@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>塞壬小工具 · D14 试唱台</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { min-height: 100%; }
+    body {
+      padding: calc(env(safe-area-inset-top, 0px) + 16px) 16px calc(env(safe-area-inset-bottom, 0px) + 28px);
+      background: #06131c; color: #dff3f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                   "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%;
+    }
+    h1 { font-size: 19px; margin-bottom: 4px; }
+    h2 { font-size: 13px; color: #6fd8c4; margin-bottom: 10px; font-weight: 600; letter-spacing: .04em; }
+    .sub { font-size: 12px; color: #7fa8a8; margin-bottom: 16px; line-height: 1.65; }
+    .card { background: #0d2230; border: 1px solid #1d4356; border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+    .row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; font-size: 13px; }
+    .row + .row { border-top: 1px solid #16323f; }
+    .row .k { color: #7fa8a8; flex: 0 0 auto; }
+    .row .v { font-variant-numeric: tabular-nums; text-align: right; word-break: break-all; }
+    button {
+      width: 100%; padding: 13px; margin-top: 8px; border: 0; border-radius: 10px;
+      font-family: inherit; font-size: 15px; font-weight: 600;
+      background: linear-gradient(180deg, #7ff0d8, #3fbfa6); color: #04202c; cursor: pointer;
+    }
+    button:active { opacity: .82; }
+    button.ghost { background: transparent; color: #6fd8c4; border: 1px solid #2d6b7a; }
+    button:disabled { opacity: .38; }
+    .btnrow { display: flex; gap: 8px; }
+    .btnrow > button { flex: 1; }
+    select {
+      width: 100%; padding: 10px; margin-top: 8px; border-radius: 8px;
+      background: #081a24; color: #dff3f0; border: 1px solid #1d4356;
+      font-family: inherit; font-size: 14px;
+    }
+    .score { font-size: 52px; font-weight: 700; line-height: 1.05; font-variant-numeric: tabular-nums; color: #6fd8c4; }
+    .score.dim { color: #3d5a66; }
+    canvas { display: block; width: 100%; background: #081a24; border-radius: 8px; margin-top: 8px; }
+    .warn { color: #ffb37a; }
+    .err { color: #ff8098; }
+    .ok { color: #6fd8c4; }
+    pre {
+      font-size: 11px; line-height: 1.55; color: #9fc4c0; background: #081a24;
+      border-radius: 8px; padding: 10px; max-height: 260px; overflow: auto;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    .verdict { font-size: 13px; line-height: 1.7; padding: 10px; border-radius: 8px; background: #081a24; margin-top: 8px; }
+  </style>
+</head>
+<body>
+  <h1>D14 试唱台</h1>
+  <p class="sub">
+    开发工具，<b>不会打进上传的 zip</b>。用途有两个：<br />
+    <b>步骤 2</b> — 试听<b>海妖的合成音色</b>，判断"3 秒内能否听出是小星星"（这与你的嗓音无关）；<br />
+    <b>步骤 3</b> — 对着乐句真唱或哼唱，看<b>分数是否符合直觉</b>，并核对机器听出来的音和你唱的是否一致。
+    <br /><span id="verTag" style="color:#4a7383"></span>
+  </p>
+
+  <!-- ============ 步骤 2：音色试听 ============ -->
+  <div class="card">
+    <h2>步骤 2 · 海妖的合成音色</h2>
+    <p class="sub" style="margin-bottom:8px">
+      一次播三样：先用 <code>siren</code> 唱《小星星》第 1 句，再单独听 <code>cue</code>（提示音）
+      与 <code>tick</code>（节拍）。
+      <br />验收标准：<b>不等播完就能听出是哪首歌</b>；<code>cue</code> 必须"极短极干极中性"，绝不抢注意力。
+    </p>
+    <button id="playTimbre" type="button">▶ 试听三种音色</button>
+    <div class="row"><span class="k">播放状态</span><span class="v" id="timbreState">未播放</span></div>
+    <button class="ghost" id="diagBtn" type="button">🔍 音频诊断（听不到声音就点这里）</button>
+  </div>
+
+  <!-- 诊断输出：听不到声音时最关键的面板 -->
+  <div class="card" id="diagCard" hidden>
+    <h2>音频诊断</h2>
+    <pre id="diagOut">点上面的按钮开始。</pre>
+    <button class="ghost" id="diagBeep" type="button">▶ 只播一个最原始的 440Hz 正弦（绕过所有音色链）</button>
+    <div class="row"><span class="k">页面报错</span><span class="v" id="errBox">（无）</span></div>
+  </div>
+
+  <!-- ============ 步骤 3：试唱打分 ============ -->
+  <div class="card">
+    <h2>步骤 3 · 唱一句，看得分</h2>
+    <p class="sub" style="margin-bottom:6px">
+      先点「① 听乐句」熟悉一下，再点「② 开录」唱回去（哼唱也行，闭口发"嗯"）。
+      <br />想换句子就在下面选。每句都唱满分不可能，重点是<b>分数要符合你自己的感觉</b>。
+    </p>
+
+    <label class="sub" for="phraseSelect" style="display:block;margin-bottom:2px">当前乐句（原句用五声音阶 / 熟曲用大调）</label>
+    <select id="phraseSelect"></select>
+
+    <div class="btnrow">
+      <button id="listenBtn" type="button">① 听乐句</button>
+      <button id="recordBtn" type="button">② 开录</button>
+    </div>
+    <div class="btnrow">
+      <button class="ghost" id="stopBtn" type="button" disabled>停止</button>
+      <button class="ghost" id="micBtn" type="button">开启麦克风</button>
+    </div>
+    <button class="ghost" id="micCheckBtn" type="button">🎤 麦克风电平体检（10 秒，听不清/漏检就点这个）</button>
+
+    <div class="row"><span class="k">阶段</span><span class="v" id="phase">空闲</span></div>
+    <div class="row"><span class="k">麦克风</span><span class="v" id="micState">未授权</span></div>
+    <div class="row" style="align-items:flex-start">
+      <span class="k">实时反馈</span>
+      <span class="v" id="liveHz" style="text-align:right">--</span>
+    </div>
+    <p class="sub" style="margin:6px 0 0;font-size:11.5px">
+      录音时请盯住「实时反馈」那行：<b>出现 ▅ 或 █ 才说明系统听得清</b>。
+      如果一直停在 ▁ 或 ▃，说明输入电平太低——请靠近麦克风（15–20cm）或唱响一些，
+      <b>否则会大量漏检</b>（离线验证：YIN 在 0.003 RMS 以上都能 100% 检出，问题只出在输入太弱）。
+    </p>
+  </div>
+
+  <!-- ============ 结果 ============ -->
+  <div class="card">
+    <h2>结果</h2>
+    <div class="score dim" id="score">--</div>
+    <canvas id="roll" width="660" height="260"></canvas>
+    <p class="sub" style="margin:8px 0 0">
+      上图：<span style="color:#ffd98a">黄色 = 海妖唱的目标音</span> ·
+      <span style="color:#6fd8c4">青色 = 机器听出来的你的音</span>。横轴时间，纵轴音高。
+      <br />两者形状对得上 → 分数应该高；形状明显不同 → 分数应该低。
+    </p>
+    <div class="verdict" id="verdict">还没唱。先听一句，再开录。</div>
+    <div class="row" style="align-items:flex-start">
+      <span class="k">采集统计</span>
+      <span class="v" id="captureStats" style="text-align:right;line-height:1.7">--</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>明细（仅开发期可见）</h2>
+    <div class="row"><span class="k">移调补偿</span><span class="v" id="transpose">--</span></div>
+    <div class="row"><span class="k">切分出几个音</span><span class="v" id="noteStats">--</span></div>
+    <div class="row"><span class="k">目标音名</span><span class="v" id="targetNames">--</span></div>
+    <div class="row"><span class="k">听出的音名</span><span class="v" id="heardNames">--</span></div>
+    <details style="margin-top:10px">
+      <summary class="sub" style="cursor:pointer">四维拆解（<b>仅供开发期调参</b>，正式版本绝不返回，见规格书 D7.4）</summary>
+      <div class="row"><span class="k">Contour 音型轮廓 (30%)</span><span class="v" id="dimContour">--</span></div>
+      <div class="row"><span class="k">Pitch 音高准确 (35%)</span><span class="v" id="dimPitch">--</span></div>
+      <div class="row"><span class="k">Rhythm 节奏对齐 (25%)</span><span class="v" id="dimRhythm">--</span></div>
+      <div class="row"><span class="k">Completeness 完整度 (10%)</span><span class="v" id="dimComplete">--</span></div>
+    </details>
+    <button class="ghost" id="copyBtn" type="button">生成测试记录（可复制）</button>
+    <pre id="reportOut">点上面的按钮生成。</pre>
+  </div>
+
+  <!-- 后端模块：顺序遵循 D2 -->
+  <script src="../../data/melodies.js"></script>
+  <script src="../core/store.js"></script>
+  <script src="../core/pitch.js"></script>
+  <script src="../core/segment.js"></script>
+  <script src="../core/score.js"></script>
+  <script src="../core/audio.js"></script>
+  <script src="../core/melody.js"></script>
+  <script src="../core/fleet.js"></script>
+  <script src="./lab.js"></script>
+</body>
+</html>

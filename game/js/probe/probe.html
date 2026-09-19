@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>塞壬小工具 · M0 探针</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { min-height: 100%; }
+    body {
+      padding: calc(env(safe-area-inset-top, 0px) + 16px) 16px calc(env(safe-area-inset-bottom, 0px) + 24px);
+      background: #06131c;
+      color: #dff3f0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                   "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      -webkit-font-smoothing: antialiased;
+      -webkit-text-size-adjust: 100%;
+    }
+    h1 { font-size: 19px; margin-bottom: 4px; }
+    .sub { font-size: 12px; color: #7fa8a8; margin-bottom: 16px; line-height: 1.6; }
+
+    .card {
+      background: #0d2230;
+      border: 1px solid #1d4356;
+      border-radius: 12px;
+      padding: 14px;
+      margin-bottom: 12px;
+    }
+    .card h2 { font-size: 13px; color: #6fd8c4; margin-bottom: 10px; font-weight: 600; letter-spacing: .04em; }
+
+    .row { display: flex; justify-content: space-between; gap: 10px; padding: 5px 0; font-size: 13px; }
+    .row + .row { border-top: 1px solid #16323f; }
+    .row .k { color: #7fa8a8; flex: 0 0 auto; }
+    .row .v { font-variant-numeric: tabular-nums; text-align: right; word-break: break-all; }
+
+    .big {
+      font-size: 40px; font-weight: 700; font-variant-numeric: tabular-nums;
+      line-height: 1.1; letter-spacing: -0.02em;
+    }
+    .big.pitch { color: #6fd8c4; }
+    .big.none { color: #3d5a66; }
+    .note { font-size: 22px; font-weight: 600; color: #ffd98a; margin-left: 10px; }
+
+    button {
+      width: 100%; padding: 14px; margin-top: 6px;
+      border: 0; border-radius: 10px;
+      font-family: inherit; font-size: 15px; font-weight: 600;
+      background: linear-gradient(180deg, #7ff0d8, #3fbfa6);
+      color: #04202c; cursor: pointer;
+    }
+    button:active { opacity: .82; }
+    button.ghost { background: transparent; color: #6fd8c4; border: 1px solid #2d6b7a; margin-top: 10px; }
+    button:disabled { opacity: .4; }
+
+    /* 音高历史条 */
+    #history { display: block; width: 100%; height: 90px; background: #081a24; border-radius: 8px; margin-top: 8px; }
+
+    .bar { height: 10px; border-radius: 5px; background: #16323f; overflow: hidden; margin-top: 8px; }
+    .bar > i { display: block; height: 100%; background: linear-gradient(90deg, #3fbfa6, #7ff0d8); width: 0; }
+
+    .warn { color: #ffb37a; }
+    .err { color: #ff8098; }
+    .ok { color: #6fd8c4; }
+    pre {
+      font-size: 11px; line-height: 1.5; color: #9fc4c0;
+      background: #081a24; border-radius: 8px; padding: 10px;
+      max-height: 200px; overflow: auto; white-space: pre-wrap; word-break: break-all;
+    }
+  </style>
+</head>
+<body>
+  <h1>M0 探针 · 塞壬小工具</h1>
+  <p class="sub">
+    验证无法在离线环境测的四件事：<b>A1</b> AudioContext / AnalyserNode 是否可用 ·
+    <b>A2</b> 主线程单帧耗时（目标 &lt; 5ms）·
+    <b>A4</b> 真实采样率与端到端延迟（目标 &lt; 150ms）·
+    <b>A5</b> 环境噪音下的识别成功率。<br />
+    这是开发工具，<b>不会打进上传的 zip</b>。
+  </p>
+
+  <div class="card">
+    <h2>实时音高</h2>
+    <div>
+      <span class="big pitch none" id="hz">--</span>
+      <span class="note" id="note"></span>
+    </div>
+    <div class="row"><span class="k">置信度 conf</span><span class="v" id="conf">--</span></div>
+    <div class="row"><span class="k">输入电平 RMS</span><span class="v" id="rms">--</span></div>
+    <div class="row"><span class="k">中位数音高（近 20 帧）</span><span class="v" id="median">--</span></div>
+    <canvas id="history" width="600" height="180"></canvas>
+    <p class="sub" style="margin:8px 0 0">
+      测音域：<b>C3(131Hz) ~ E5(659Hz)</b>。超出范围会显示 --（不是错值）。
+      哼唱请闭口发"嗯"，真唱发"啊"。
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>性能（A2）</h2>
+    <div class="row"><span class="k">单帧检测耗时 中位数</span><span class="v" id="perf50">--</span></div>
+    <div class="row"><span class="k">单帧检测耗时 P95</span><span class="v" id="perf95">--</span></div>
+    <div class="row"><span class="k">最差单帧</span><span class="v" id="perfMax">--</span></div>
+    <div class="row"><span class="k">检测次数 / 帧率</span><span class="v" id="perfCount">--</span></div>
+    <div class="bar"><i id="perfBar"></i></div>
+    <div class="row"><span class="k">分析窗口</span><span class="v" id="winInfo">2048（可切 1024 兜底）</span></div>
+    <button class="ghost" id="toggleWin" type="button">切到窗口 1024（性能兜底）</button>
+  </div>
+
+  <div class="card">
+    <h2>环境（A1 / A4 / A5）</h2>
+    <div class="row"><span class="k">AudioContext 采样率</span><span class="v" id="sr">--</span></div>
+    <div class="row"><span class="k">AudioContext 状态</span><span class="v" id="ctxState">--</span></div>
+    <div class="row"><span class="k">AnalyserNode 可用</span><span class="v" id="analyserOk">--</span></div>
+    <div class="row"><span class="k">麦克风授权</span><span class="v" id="micState">未请求</span></div>
+    <div class="row"><span class="k">AEC / NS / AGC</span><span class="v" id="dspState">关 / 关 / 关</span></div>
+    <div class="row"><span class="k">环境噪音基线 RMS</span><span class="v" id="noiseFloor">--</span></div>
+    <div class="row"><span class="k">信噪比 SNR</span><span class="v" id="snr">--</span></div>
+    <div class="row"><span class="k">端到端延迟估算</span><span class="v" id="latency">--</span></div>
+    <div class="row"><span class="k">有音高帧占比</span><span class="v" id="hitRate">--</span></div>
+    <div class="row"><span class="k">音名序列（本次统计）</span><span class="v" id="seq">--</span></div>
+  </div>
+
+  <div class="card">
+    <h2>操作</h2>
+    <button id="start" type="button">开始采集（需要麦克风手势授权）</button>
+    <button class="ghost" id="stop" type="button" disabled>停止</button>
+    <button class="ghost" id="calib" type="button" disabled>重测环境噪音基线（静默 3 秒）</button>
+    <button class="ghost" id="report" type="button">生成探针报告（可复制发给后端）</button>
+  </div>
+
+  <div class="card">
+    <h2>探针报告</h2>
+    <pre id="reportOut">点上面的按钮生成。</pre>
+  </div>
+
+  <script src="./../core/pitch.js"></script>
+  <script src="./probe.js"></script>
+</body>
+</html>

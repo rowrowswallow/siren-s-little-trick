@@ -1,0 +1,15 @@
+{
+  "name": "siren-minitool",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "《塞壬的小把戏》小红书小工具 · 后端（离线 H5，打包为可上传 zip）",
+  "scripts": {
+    "test": "node tools/test-pitch.mjs && node tools/test-score.mjs && node tools/test-fleet.mjs && node tools/test-hum.mjs && node tools/test-integration.mjs",
+    "check": "node tools/selfcheck.mjs",
+    "verify": "node tools/selfcheck.mjs && node tools/test-pitch.mjs && node tools/test-score.mjs && node tools/test-fleet.mjs && node tools/test-hum.mjs && node tools/test-integration.mjs && node tools/pack.mjs --check-only",
+    "build": "node tools/pack.mjs",
+    "curve": "node tools/show-wreck-rate.mjs",
+    "serve": "node tools/serve.mjs"
+  }
+}

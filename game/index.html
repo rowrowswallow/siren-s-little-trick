@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <title>塞壬的小把戏</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <!--
+    入口骨架（依据 02-后端开发规格书 D2）
+
+    ⚠️ 页面结构与全部渲染由前端负责（规格书 D0 职责边界）。
+    本文件当前只做两件事：
+      1. 按 D2 规定的顺序加载后端脚本（顺序不可乱）
+      2. 提供 #app 作为前端挂载点
+
+    前端接入时在 #app 内构建视图，并按需在末尾追加 ./js/main.js。
+    data/melodies.js 必须在 melody.js 之前加载（熟曲库不能 fetch，D2）。
+  -->
+  <div id="app"></div>
+
+  <!-- 后端：顺序不可乱（D2） -->
+  <script src="./data/melodies.js"></script>
+  <script src="./js/core/store.js"></script>
+  <script src="./js/core/pitch.js"></script>
+  <script src="./js/core/segment.js"></script>
+  <script src="./js/core/score.js"></script>
+  <script src="./js/core/audio.js"></script>
+  <script src="./js/core/melody.js"></script>
+  <script src="./js/core/fleet.js"></script>
+  <script src="./js/core/game.js"></script>
+  <script src="./js/core/index.js"></script>
+  <!-- 前端：在此之后 -->
+</body>
+</html>
