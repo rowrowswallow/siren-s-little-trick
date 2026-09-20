@@ -2,26 +2,108 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport"
-        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#84d9f5" />
   <title>塞壬的小把戏</title>
   <link rel="stylesheet" href="./style.css" />
 </head>
 <body>
-  <!--
-    入口骨架（依据 02-后端开发规格书 D2）
+  <main id="app" data-phase="BOOT" data-subphase="" aria-label="塞壬的小把戏">
+    <div class="stage" id="stage">
+      <div class="sea-scene" aria-hidden="true"></div>
+      <div class="water-shimmer" aria-hidden="true"></div>
+      <canvas id="fleet-canvas" aria-label="海面上的船队，随着歌声靠近礁石"></canvas>
+      <div id="siren" class="siren" data-pose="idle" aria-hidden="true">
+        <div class="siren-art"></div>
+        <div class="siren-glow"></div>
+      </div>
+      <div class="singing-notes" aria-hidden="true"><span>♪</span><span>♫</span><span>♪</span></div>
 
-    ⚠️ 页面结构与全部渲染由前端负责（规格书 D0 职责边界）。
-    本文件当前只做两件事：
-      1. 按 D2 规定的顺序加载后端脚本（顺序不可乱）
-      2. 提供 #app 作为前端挂载点
+      <header class="game-header">
+        <button class="quiet-button exit-button" type="button" data-action="abort" aria-label="离开本局，回到首页" hidden>
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m14 6-6 6 6 6" /></svg><span>返回</span>
+        </button>
+        <div class="phrase-dots" id="phrase-dots" aria-label="旋律进度" hidden><i></i><i></i><i></i><i></i><i></i></div>
+        <div class="ship-counter" id="ship-counter" hidden>
+          <svg class="icon boat-icon" viewBox="0 0 64 56" aria-hidden="true"><path class="boat-hull" d="M7 33h50l-7 15H15Z" /><path class="boat-cabin" d="m18 32 3-17h23l3 17" /><path class="boat-flag" d="M32 15V3l12 5-12 5" /><path d="M27 24v2m11-2v2" /><path class="boat-water" d="M12 51q6 4 12 0t12 0 12 0" /></svg>
+          <strong id="ship-number">0</strong><span>条船</span>
+        </div>
+      </header>
 
-    前端接入时在 #app 内构建视图，并按需在末尾追加 ./js/main.js。
-    data/melodies.js 必须在 melody.js 之前加载（熟曲库不能 fetch，D2）。
-  -->
-  <div id="app"></div>
+      <section class="home-view" id="home-view">
+        <h1><span class="title-first">塞壬的</span><span class="title-main">小把戏</span></h1>
+        <p class="home-subtitle">小声哼也行，她听得见</p>
+        <button class="primary-button start-button" type="button" data-action="start">
+          <span class="button-symbol" aria-hidden="true"><svg class="icon" viewBox="0 0 32 40"><rect x="10" y="2" width="12" height="23" rx="6" /><path d="M5 18v3a11 11 0 0 0 22 0v-3M16 33v5M9 38h14" /></svg></span>
+          <span>让她开口</span>
+        </button>
+      </section>
 
-  <!-- 后端：顺序不可乱（D2） -->
+      <section class="state-heading" id="state-heading" hidden>
+        <h2 id="state-title">听，她在唱</h2>
+        <p id="state-hint"></p>
+        <div id="countdown" class="countdown" aria-label="准备开口" hidden><i></i><i></i><i></i></div>
+      </section>
+
+      <section class="permission-view" id="permission-view" hidden aria-live="polite">
+        <span class="permission-symbol" aria-hidden="true"><svg class="icon" viewBox="0 0 32 40"><rect x="10" y="2" width="12" height="23" rx="6" /><path d="M5 18v3a11 11 0 0 0 22 0v-3M16 33v5M9 38h14" /></svg></span>
+        <h2>需要一个安静的小角落</h2>
+        <p>允许使用麦克风，就可以轻轻哼唱。</p>
+      </section>
+
+      <section class="voice-dock" id="voice-dock" hidden aria-label="旋律与声音提示">
+        <button type="button" class="mic-disc" id="tap-target" aria-label="跟着节奏轻点" disabled>
+          <svg class="icon" viewBox="0 0 32 40" aria-hidden="true"><rect x="10" y="2" width="12" height="23" rx="6" /><path d="M5 18v3a11 11 0 0 0 22 0v-3M16 33v5M9 38h14" /></svg>
+          <span id="mic-label">她在唱</span>
+        </button>
+        <div class="note-track" id="note-track" aria-label="旋律音块"></div>
+        <button type="button" class="replay-button" data-action="replay" aria-label="重听当前旋律">
+          <svg class="icon" viewBox="0 0 32 32" aria-hidden="true"><path d="M7 10a10 10 0 1 1-1 10M7 4v7h7" /></svg><span>重听</span>
+        </button>
+      </section>
+
+      <section id="phrase-result" class="phrase-result" hidden aria-live="polite">
+        <p id="phrase-result-label">这一句，又留住</p>
+        <div><strong id="phrase-number">0</strong><span>条船</span></div>
+        <p class="revealed-title" id="revealed-title" hidden></p>
+      </section>
+
+      <section id="result-view" class="result-view" hidden>
+        <h2><span class="result-prefix">你吸引了</span><span class="result-count"><strong id="result-number">0</strong><span>条船</span></span></h2>
+        <p id="ending-line">船走远了，她还在等你</p>
+        <div class="result-actions">
+          <button type="button" class="primary-button" data-action="restart">再来一局</button>
+          <button type="button" class="secondary-button" data-action="new-melody">换一段旋律</button>
+        </div>
+        <button type="button" class="text-button share-button" data-action="share">
+          <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h4l2-2h4l2 2h4v14H4Z" /><circle cx="12" cy="12" r="4" /></svg>分享卡
+        </button>
+      </section>
+
+      <div class="technical-notice" id="technical-notice" role="status" hidden></div>
+      <div class="rotate-hint" id="rotate-hint">
+        <svg class="icon" viewBox="0 0 28 24" aria-hidden="true"><rect x="4" y="4" width="20" height="15" rx="3" /><path d="M20 10v3" /></svg>
+        <span>横屏体验更好</span><button type="button" data-action="dismiss-rotate" aria-label="收起横屏提示">×</button>
+      </div>
+      <p class="boot-message" id="boot-message">正在准备…</p>
+    </div>
+
+    <section class="share-view" id="share-view" hidden aria-label="竖版分享卡">
+      <article id="share-card" class="share-card">
+        <div class="share-sky" aria-hidden="true"></div>
+        <p class="share-brand">塞壬的小把戏</p>
+        <p class="share-prefix">我的歌声吸引了</p>
+        <div class="share-count"><strong id="share-number">0</strong><span>条船</span></div>
+        <p class="share-line" id="share-line">船走远了，她还在等你</p>
+        <div class="share-sea" aria-hidden="true"><canvas id="share-fleet"></canvas><div class="share-siren"></div></div>
+        <p class="share-bottom">小声哼也行，她听得见</p>
+      </article>
+      <div class="share-controls"><span>截屏保存</span><button type="button" class="text-button" data-action="close-share">返回</button></div>
+    </section>
+    <p class="sr-only" id="status-live" aria-live="polite"></p>
+  </main>
+
+  <!-- Core dependencies must be loaded in this order, before the view controller. -->
   <script src="./data/melodies.js"></script>
   <script src="./js/core/store.js"></script>
   <script src="./js/core/pitch.js"></script>
@@ -32,6 +114,6 @@
   <script src="./js/core/fleet.js"></script>
   <script src="./js/core/game.js"></script>
   <script src="./js/core/index.js"></script>
-  <!-- 前端：在此之后 -->
+  <script src="./js/main.js"></script>
 </body>
 </html>
