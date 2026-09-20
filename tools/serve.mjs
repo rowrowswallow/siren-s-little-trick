@@ -57,7 +57,7 @@ server.listen(PORT, '127.0.0.1', () => {
   console.log(`源目录：${ROOT}`);
   console.log('改完 game/ 里的文件刷新页面即可；打包请运行 node tools/pack.mjs');
 console.log('');
-console.log('  /                     占位主页面（前端朋友的 demo）');
+console.log('  /                     完整游戏：主视觉、哼唱/点拍、终局与分享卡');
 console.log('  /js/probe/probe.html  M0 探针：验证麦克风 / 音高 / 性能 / 延迟');
 console.log('');
 console.log('注：探针页必须走 http（file:// 下浏览器会拒绝 getUserMedia）。');
