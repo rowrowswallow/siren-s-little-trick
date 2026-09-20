@@ -515,9 +515,9 @@ check('notice code 全部在契约 C4 表内',
   notices.every((e) => ALL_CODES.indexOf(e.payload.code) >= 0),
   [...new Set(notices.map((e) => e.payload.code))].join(', ') || '(无)');
 check('notice level = notice', notices.every((e) => e.payload.level === 'notice'));
-check('后端不返回任何中文文案',
-  !/[\u4e00-\u9fa5]/.test(JSON.stringify(events.map((e) => e.payload))),
-  '全部事件载荷零中文');
+check('除契约允许的熟曲标题外，后端不返回任何中文文案',
+  !/[\u4e00-\u9fa5]/.test(JSON.stringify(events.filter((e) => e.type !== 'melody:titleReveal').map((e) => e.payload))),
+  'melody:titleReveal 的歌名是契约 C3 的内容数据，其余事件载荷零中文');
 
 // ================================================================ 6
 
@@ -556,6 +556,8 @@ console.log('');
 console.log('[7] 静默 3s 中止（D3：不广播提示文案，只给 reason）');
 events.length = 0;
 await Siren.init({ seed: 777 });
+// 前面的完整演唱监听器会在每次 attempt:start 恢复发声；本用例在它之后明确静音。
+const stopSilentAttempt = Siren.on('attempt:start', () => micStub.setSilent(true));
 Siren.start();
 await Promise.resolve();
 await Promise.resolve();
@@ -571,6 +573,7 @@ check('静默时只广播 NO_INPUT 技术码，无任何中文提示',
   noInput.length <= 1 && !/[\u4e00-\u9fa5]/.test(JSON.stringify(noInput.map((e) => e.payload))),
   'NO_INPUT ' + noInput.length + ' 次');
 Siren.abort();
+stopSilentAttempt();
 
 // ================================================================ 8
 

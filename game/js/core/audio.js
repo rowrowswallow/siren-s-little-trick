@@ -50,6 +50,7 @@
   var dryGain = null;
   var wetGain = null;
   var convolver = null;
+  var reverbHighpass = null;
   var noiseBuffer = null;
   var irBuilt = false;
   var muted = false;
@@ -59,6 +60,7 @@
 
   // 活跃声部计数（便于诊断；不做对象池是因为每个音符的生命周期由 stop() 明确结束）
   var activeVoices = 0;
+  var scheduledVoices = [];
 
   // ---------------------------------------------------------------- 上下文（D4.1）
 
@@ -126,6 +128,7 @@
 
     // 混响支路（IR 延后生成，只在需要时构建一次）
     dryGain.connect(masterGain);
+    wetGain.connect(masterGain);
   }
 
   /** 代码生成脉冲响应（D4.5）——不打包音频文件 */
@@ -146,12 +149,12 @@
 
     // 混响链上串 highpass @300Hz（否则低频糊成一团）
     var hp = ctx.createBiquadFilter();
+    reverbHighpass = hp;
     hp.type = 'highpass';
     hp.frequency.value = IR.highpassHz;
 
     convolver.connect(hp);
     hp.connect(wetGain);
-    wetGain.connect(masterGain);
     irBuilt = true;
   }
 
@@ -318,11 +321,13 @@
       chain.output.connect(masterGain);
     }
 
+    var voice = { oscillators: oscillators, gain: voiceGain, timer: null, stopped: false };
+    scheduledVoices.push(voice);
     activeVoices += 1;
-    var cleanupAt = (durationS + 0.2) * 1000;
-    global.setTimeout(function () {
-      activeVoices = Math.max(0, activeVoices - 1);
-    }, cleanupAt);
+    // 排程中的音也要保留，不能在它真正开始之前就丢掉取消句柄。
+    voice.timer = global.setTimeout(function () {
+      disposeVoice(voice, false);
+    }, Math.max(0, now - ctx.currentTime + durationS + 0.2) * 1000);
 
     return { stopAt: now + durationS + 0.05 };
   }
@@ -335,8 +340,8 @@
   /**
    * 播放一个乐句（notes[] 来自契约 C3：{midi, startMs, durationMs, degree}）
    * @param {Array} notes
-   * @param {Object} [opts] opts.when（AudioContext 时间基准，默认 now）, opts.gain
-   * @returns {number} 乐句总时长（秒）
+   * @param {Object} [opts] opts.when（AudioContext 时间基准）, opts.gain, opts.reverb
+   * @returns {number} 从调用时刻到最后一个音结束的时长（秒，含排程提前量）
    */
   function playPhrase(notes, opts) {
     opts = opts || {};
@@ -354,11 +359,12 @@
         freq: Pitch.midiToHz(n.midi),
         startTime: startS,
         durationS: durS,
-        gain: opts.gain
+        gain: opts.gain,
+        reverb: opts.reverb
       });
       totalS = Math.max(totalS, n.startMs / 1000 + durS);
     }
-    return totalS;
+    return Math.max(0, base - ctx.currentTime) + totalS;
   }
 
   /** 提示音（玩家演唱时的音块提示：极短极干极中性） */
@@ -399,14 +405,38 @@
 
   function isMuted() { return muted; }
 
+  function disposeVoice(voice, stop) {
+    if (voice.stopped) return;
+    voice.stopped = true;
+    global.clearTimeout(voice.timer);
+    for (var i = 0; i < voice.oscillators.length; i += 1) {
+      try { if (stop) voice.oscillators[i].stop(); } catch (e) { /* 已结束 */ }
+      try { voice.oscillators[i].disconnect(); } catch (e) { /* 已断开 */ }
+    }
+    try { voice.gain.disconnect(); } catch (e) { /* 已断开 */ }
+    scheduledVoices = scheduledVoices.filter(function (v) { return v !== voice; });
+    activeVoices = Math.max(0, activeVoices - 1);
+  }
+
+  /** 取消当前和未来的音符，同时清除混响尾音；保留已解锁的 AudioContext。 */
+  function stopPlayback() {
+    var voices = scheduledVoices.slice();
+    for (var i = 0; i < voices.length; i += 1) disposeVoice(voices[i], true);
+    Object.keys(chains).forEach(function (type) {
+      try { chains[type].input.disconnect(); } catch (e) { /* 忽略 */ }
+      try { chains[type].output.disconnect(); } catch (e) { /* 忽略 */ }
+    });
+    chains = {};
+    try { if (convolver) convolver.disconnect(); } catch (e) { /* 忽略 */ }
+    try { if (reverbHighpass) reverbHighpass.disconnect(); } catch (e) { /* 忽略 */ }
+    convolver = null;
+    reverbHighpass = null;
+    irBuilt = false;
+  }
+
   /** 释放音频资源（回 HOME / 中止时调用） */
   function release() {
-    chains = {};
-    if (ctx) {
-      // 不 close()：小工具内可能还要继续用；只断开混响支路避免残留
-      try { if (convolver) convolver.disconnect(); } catch (e) { /* 忽略 */ }
-    }
-    irBuilt = false;
+    stopPlayback();
   }
 
   function stats() {
@@ -499,6 +529,7 @@
     tick: tick,
     setMuted: setMuted,
     isMuted: isMuted,
+    stopPlayback: stopPlayback,
     release: release,
     getAudioContext: getAudioContext,
     computeInputGain: computeInputGain,

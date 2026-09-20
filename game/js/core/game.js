@@ -45,7 +45,9 @@
   var listeners = {};
   var timers = [];
   var pitchTimer = null;
-  var stopRecord = null;
+  var listenTimer = null;
+  var recordTimer = null;
+  var runToken = 0;
   var replayUsed = false;
 
   // 采音状态
@@ -60,10 +62,11 @@
   var recordStartAt = 0;
   var recordDuration = 0;
   var recordEndReason = null;
+  var recordTargetEnd = 0;
+  var recordHadVoice = false;
   var lastVoicedAt = 0;
   var lastPitchSent = 0;
   var countdownValue = 0;
-  var pendingMicResolve = null;
 
   var fallbackTarget = null;      // 兜底模式的节奏目标
   var fallbackTaps = [];
@@ -89,8 +92,9 @@
   }
 
   function emit(type, payload) {
+    var token = runToken;
     var arr = listeners[type];
-    if (!arr || !arr.length) return;
+    if (!arr || !arr.length) return true;
     var snapshot = arr.slice();
     for (var i = 0; i < snapshot.length; i += 1) {
       try {
@@ -101,22 +105,25 @@
           global.console.warn('[Siren] listener error on "' + type + '"', e);
         }
       }
+      // 回调可以同步 abort/init；之后不得继续本局的事件或定时器。
+      if (token !== runToken) return false;
     }
+    return true;
   }
 
   /** 技术状态码（契约 C4）——绝不带中文文案 */
-  function notice(code) { emit('notice', { code: code, level: 'notice' }); }
-  function error(code, message) { emit('error', { code: code, message: message || '' }); }
+  function notice(code) { return emit('notice', { code: code, level: 'notice' }); }
+  function error(code, message) { return emit('error', { code: code, message: message || '' }); }
 
   function setPhase(next, sub) {
     phase = next;
     subPhase = sub === undefined ? subPhase : sub;
-    emit('state:change', { phase: phase, subPhase: subPhase, phraseIndex: phraseIndex });
+    return emit('state:change', { phase: phase, subPhase: subPhase, phraseIndex: phraseIndex });
   }
 
   function setSub(next) {
     subPhase = next;
-    emit('state:change', { phase: phase, subPhase: subPhase, phraseIndex: phraseIndex });
+    return emit('state:change', { phase: phase, subPhase: subPhase, phraseIndex: phraseIndex });
   }
 
   function getState() {
@@ -147,37 +154,53 @@
   }
 
   function later(fn, ms) {
+    var token = runToken;
     var id = global.setTimeout(function () {
       timers = timers.filter(function (t) { return t !== id; });
-      fn();
+      if (token === runToken) fn();
     }, ms);
     timers.push(id);
     return id;
   }
 
+  function cancelTimer(id) {
+    if (id === null) return;
+    global.clearTimeout(id);
+    timers = timers.filter(function (t) { return t !== id; });
+  }
+
   function clearTimers() {
     for (var i = 0; i < timers.length; i += 1) global.clearTimeout(timers[i]);
     timers = [];
+    listenTimer = null;
+    recordTimer = null;
     if (pitchTimer) { global.clearInterval(pitchTimer); pitchTimer = null; }
   }
 
   // ---------------------------------------------------------------- 麦克风
 
-  function requestMic() {
+  function requestMic(token) {
     return new Promise(function (resolve) {
       if (!global.navigator || !global.navigator.mediaDevices ||
           typeof global.navigator.mediaDevices.getUserMedia !== 'function') {
         resolve(false);
         return;
       }
-      global.navigator.mediaDevices.getUserMedia({
+      var request;
+      try { request = global.navigator.mediaDevices.getUserMedia({
         audio: {
           // ⚠️ D4.7：这三个 false 是全项目最重要的配置
           echoCancellation: false,   // 会吃掉人声
           noiseSuppression: false,   // 会破坏音高
           autoGainControl: false     // 动态压缩影响判定
         }
-      }).then(function (stream) {
+      }); } catch (e) { resolve(false); return; }
+      Promise.resolve(request).then(function (stream) {
+        if (token !== runToken) {
+          stopStream(stream);
+          resolve(false);
+          return;
+        }
         mic.stream = stream;
         var c = Audio.ensureAudio();
         mic.source = c.createMediaStreamSource(stream);
@@ -187,24 +210,43 @@
         mic.source.connect(mic.analyser);
         // ⚠️ 绝不 connect 到 destination，否则啸叫
         mic.buf = new Float32Array(2048);
-        pendingMicResolve = resolve;
         resolve(true);
       }).catch(function (err) {
-        error('MIC_DENIED', err && err.name ? err.name : 'getUserMedia failed');
+        if (token === runToken) releaseMic();
         resolve(false);
       });
     });
   }
 
+  function stopStream(stream) {
+    if (!stream) return;
+    var tracks = stream.getTracks();
+    for (var i = 0; i < tracks.length; i += 1) tracks[i].stop();
+  }
+
   function releaseMic() {
-    if (mic.stream) {
-      var tracks = mic.stream.getTracks();
-      for (var i = 0; i < tracks.length; i += 1) tracks[i].stop();
-    }
+    stopStream(mic.stream);
     if (mic.source) { try { mic.source.disconnect(); } catch (e) { /* 忽略 */ } }
     mic.stream = null;
     mic.source = null;
     mic.analyser = null;
+    mic.buf = null;
+    mic.gainBuf = null;
+  }
+
+  function cleanRun() {
+    runToken += 1;
+    clearTimers();
+    if (fallbackTapHandler && global.document) {
+      global.document.removeEventListener('pointerdown', fallbackTapHandler);
+      fallbackTapHandler = null;
+    }
+    releaseMic();
+    Audio.release();
+    recordEndReason = 'done';
+    mic.inputGain = 1;
+    mic.inputPeak = 0;
+    mic.noiseFloor = 0.004;
   }
 
   function rmsOf(buf) {
@@ -254,7 +296,8 @@
     lastEnding = null;
     lastTitleRevealed = null;
     Store.set(Store.KEYS.SEED, seed);
-    setPhase('LEARN_LOOP');
+    fallbackTarget = null;
+    if (!setPhase('LEARN_LOOP', null)) return;
     runPhrase();
   }
 
@@ -269,30 +312,37 @@
     var phrase = currentPhrase();
     var notes = phraseNotes();
 
-    setSub('LISTEN');
-    emit('melody:phraseStart', {
+    if (!setSub('LISTEN')) return;
+    playListen(notes, phrase.eighths.slice(), !!phrase.familiar);
+  }
+
+  function playListen(notes, eighths, familiar) {
+    cancelTimer(listenTimer);
+    Audio.stopPlayback();
+    if (!emit('melody:phraseStart', {
       phraseIndex: phraseIndex,
       notes: notes,
-      eighths: phrase.eighths.slice(),
-      familiar: !!phrase.familiar,
+      eighths: eighths,
+      familiar: familiar,
       seed: seed
-    });
+    })) return;
 
     // 海妖唱出本乐句；后端负责播放，前端跟着 notes[] 做视觉同步（契约 C3）
     var sungS = Audio.playPhrase(notes);
-    var listenMs = Math.max(900, Math.round(sungS * 1000) + 260);
+    var noteEndMs = notes.reduce(function (end, n) { return Math.max(end, n.startMs + n.durationMs); }, 0);
+    var listenMs = Math.max(900, Math.round(Math.max(sungS * 1000, noteEndMs)) + 260);
 
-    later(function () {
-      setSub('COUNTDOWN');
-      calibrateNoise(function () {
-        countdownStep(3);
-      });
+    listenTimer = later(function () {
+      listenTimer = null;
+      if (!setSub('COUNTDOWN')) return;
+      if (phase === 'RHYTHM_FALLBACK') countdownStep(3);
+      else calibrateNoise(function () { countdownStep(3); });
     }, listenMs);
   }
 
   function countdownStep(n) {
     countdownValue = n;
-    emit('attempt:countdown', { from: n });
+    if (!emit('attempt:countdown', { from: n })) return;
     if (n > 1) {
       later(function () { countdownStep(n - 1); }, 700);
     } else {
@@ -305,31 +355,31 @@
   }
 
   function beginRecord() {
-    setSub('RECORD');
+    if (!setSub('RECORD')) return;
     recordFrames = [];
     recordStartAt = monoNow();
     recordDuration = 0;
     recordEndReason = null;
+    recordHadVoice = false;
     lastVoicedAt = monoNow();
     lastPitchSent = 0;
     mic.peakRms = 0;
 
     // 音块提示：把目标音在演唱时同步提示一遍（极短极干，绝不抢注意力）
     var notes = phraseNotes();
+    recordTargetEnd = notes.reduce(function (end, n) { return Math.max(end, n.startMs + n.durationMs); }, 0);
     var base = Audio.ensureAudio().currentTime + 0.05;
     for (var i = 0; i < notes.length; i += 1) {
       Audio.cue(notes[i].midi, base + notes[i].startMs / 1000);
     }
 
-    emit('attempt:start', { phraseIndex: phraseIndex });
-    setSub(null);
-    subPhase = 'RECORD';
+    if (!emit('attempt:start', { phraseIndex: phraseIndex })) return;
 
     // D11：音高实时数据每 50ms 推一次
     pitchTimer = global.setInterval(pumpPitch, 50);
 
     // 上限 6s；静默 3s 中止（D3）
-    later(function () { finishRecord('timeout'); }, CFG.RECORD_MAX_MS);
+    recordTimer = later(function () { finishRecord('timeout'); }, CFG.RECORD_MAX_MS);
   }
 
   function pumpPitch() {
@@ -364,17 +414,25 @@
     // 契约 C3：attempt:pitch 载荷 { t, midi, cents, conf, voiced }
     var cents = 0;
     if (voiced) {
+      recordHadVoice = true;
       var nearest = Math.round(r.midi);
       cents = (r.midi - nearest) * 100;
       lastVoicedAt = now;
     }
-    emit('attempt:pitch', {
+    if (!emit('attempt:pitch', {
       t: t,
       midi: voiced ? r.midi : 0,
       cents: cents,
       conf: r.conf,
       voiced: voiced
-    });
+    })) return;
+
+    // 短乐句唱完就结算，不能继续等待到「静默 3 秒」把已唱出的内容归零。
+    // 完全没有输入仍沿用下面的静默中止；600ms 留出跟唱反应时间。
+    if (recordHadVoice && t >= recordTargetEnd + 600) {
+      finishRecord('done');
+      return;
+    }
 
     // 静默中止：不广播任何提示文案，只广播 reason: 'silence'（D3）
     if (now - lastVoicedAt >= CFG.SILENCE_ABORT_MS) {
@@ -407,14 +465,18 @@
   }
 
   function finishRecord(reason, isSilence) {
+    if (phase !== 'LEARN_LOOP' || subPhase !== 'RECORD') return;
     if (pitchTimer === null && recordEndReason !== null) return;
     if (pitchTimer) { global.clearInterval(pitchTimer); pitchTimer = null; }
     if (recordEndReason !== null) return;
     recordEndReason = isSilence ? 'silence' : (reason || 'done');
     recordDuration = monoNow() - recordStartAt;
+    cancelTimer(recordTimer);
+    recordTimer = null;
+    Audio.stopPlayback();
 
-    emit('attempt:end', { reason: recordEndReason });
-    setSub('ANALYZE');
+    if (!emit('attempt:end', { reason: recordEndReason })) return;
+    if (!setSub('ANALYZE')) return;
 
     var phrase = currentPhrase();
     var score = 0;
@@ -425,7 +487,7 @@
       // 契约 C4 的 LOW_CONFIDENCE 前端文案为"有点听不清，再靠近一点"，
       // 正是这里要表达的意思。**不擅自新增状态码**——契约 C4 表是封闭的，
       // 若需要专门的"输入太弱"码，应由契约维护者补充。
-      notice('LOW_CONFIDENCE');
+      if (!notice('LOW_CONFIDENCE')) return;
     }
 
     if (recordEndReason !== 'silence') {
@@ -440,9 +502,9 @@
       for (var i = 0; i < recordFrames.length; i += 1) {
         if (recordFrames[i].hz > 0 && recordFrames[i].conf < 0.5) lowConf += 1;
       }
-      if (seg.notes.length === 0 || lowConf > recordFrames.length * 0.6) notice('LOW_CONFIDENCE');
+      if ((seg.notes.length === 0 || lowConf > recordFrames.length * 0.6) && !notice('LOW_CONFIDENCE')) return;
     } else {
-      notice('NO_INPUT');   // 契约 C4：建议前端不显示文字，改让海妖沉回水中
+      if (!notice('NO_INPUT')) return;   // 契约 C4：建议前端不显示文字，改让海妖沉回水中
     }
 
     scoreSum += score;
@@ -451,7 +513,7 @@
 
   /** D9：生成 20 条新船 → 逐船判定 → 广播入场与触礁 */
   function pullWave(score) {
-    setSub('PULL');
+    if (!setSub('PULL')) return;
 
     var ships = Fleet.spawnWave(rng, phraseIndex);
     shipsByWave.push(ships);
@@ -491,22 +553,23 @@
     var settleMs = wreckDelay + res.wrecked.length * 45 + 320;
 
     later(function () {
-      setSub('PHRASE_RESULT');
-      emit('phrase:result', {
+      if (!setSub('PHRASE_RESULT')) return;
+      if (!emit('phrase:result', {
         phraseIndex: phraseIndex,
         newWrecked: res.wrecked.length,
         totalWrecked: shipsWrecked
-      });
+      })) return;
 
       // D8：歌名仅在 V4 结算且 score ≥ 60 时广播（仅熟曲）
-      if (Melody.shouldRevealTitle(currentPhrase(), score)) {
+      if (phase === 'LEARN_LOOP' && Melody.shouldRevealTitle(currentPhrase(), score)) {
         lastTitleRevealed = currentPhrase().title;
-        emit('melody:titleReveal', { title: lastTitleRevealed });
+        if (!emit('melody:titleReveal', { title: lastTitleRevealed })) return;
       }
 
       later(function () {
         phraseIndex += 1;
         if (phraseIndex >= CFG.PHRASES) startFinale();
+        else if (phase === 'RHYTHM_FALLBACK') runFallbackPhrase();
         else runPhrase();
       }, 1500);
     }, settleMs);
@@ -515,36 +578,46 @@
   // ---------------------------------------------------------------- 终局
 
   function startFinale() {
-    setPhase('FINALE');
-    emit('game:finale', {
+    var fallback = phase === 'RHYTHM_FALLBACK';
+    releaseMic();
+    Audio.stopPlayback();
+    if (!setPhase('FINALE', null)) return;
+    if (!emit('game:finale', {
       wreckedTotal: shipsWrecked,
       ending: Fleet.decideEnding(shipsWrecked),
       seed: seed
-    });
+    })) return;
     lastEnding = Fleet.decideEnding(shipsWrecked);
 
     // 全曲回放（D3：REPLAY 3s 全曲回放）
-    var all = [];
-    for (var i = 0; i < phrases.length; i += 1) {
-      var notes = Melody.toNotes(phrases[i], CFG.BPM);
-      var step = 0.28;   // 回放提速，压到约 3 秒
+    var source = [];
+    for (var i = 0; i < CFG.PHRASES; i += 1) {
+      var notes = fallback ? fallbackTarget[i].notes : Melody.toNotes(phrases[i], CFG.BPM);
       for (var j = 0; j < notes.length; j += 1) {
-        all.push({
-          midi: notes[j].midi,
-          startMs: (i * notes.length + j) * step * 1000,
-          durationMs: step * 1000,
-          degree: notes[j].degree
-        });
+        source.push(notes[j]);
       }
     }
-    emit('melody:replay', { notes: all });
-    Audio.playPhrase(all, { gain: 0.12 });
+    // 25 个音完整保留顺序；最短 100ms 保证可辨，其余时间按原时值分配。
+    // 这是约 3 秒的快速回顾，不能用 i * 当句音数定位（3/4/5/6/7 会制造空洞）。
+    var all = [];
+    var sourceDuration = source.reduce(function (sum, n) { return sum + n.durationMs; }, 0);
+    var remainingMs = Math.max(0, 3000 - source.length * 100);
+    var cursor = 0;
+    for (var k = 0; k < source.length; k += 1) {
+      var duration = 100 + remainingMs * source[k].durationMs / sourceDuration;
+      all.push({ midi: source[k].midi, startMs: cursor, durationMs: duration, degree: source[k].degree });
+      cursor += duration;
+    }
+    if (!emit('melody:replay', { notes: all })) return;
+    // 快速回顾关闭长混响尾音，结果页按实际排程结束时间切换。
+    var playedS = Audio.playPhrase(all, { gain: 0.12, reverb: false });
 
-    var replayMs = Math.max(1500, all.length * 280 + 600);
+    var replayMs = Math.max(cursor, playedS * 1000) + 100;
     later(function () {
-      setPhase('RESULT');
+      Audio.release();
+      if (!setPhase('RESULT', null)) return;
       Store.commitRun(shipsWrecked, scoreSum);
-      later(function () { setPhase('SHARE_CARD'); }, 400);
+      later(function () { setPhase('SHARE_CARD', null); }, 400);
     }, replayMs);
   }
 
@@ -555,7 +628,6 @@
    * 船队完全沿用 D9，分数换算一致——兜底模式不残疾（D10）。
    */
   function startFallbackRun() {
-    setPhase('RHYTHM_FALLBACK');
     rng = Fleet.mulberry32(seed);
     Fleet.resetIds();
     shipsAll = [];
@@ -564,11 +636,15 @@
     shipsWrecked = 0;
     scoreSum = 0;
     phraseIndex = 0;
+    phrases = [];
+    lastEnding = null;
+    lastTitleRevealed = null;
+    Store.set(Store.KEYS.SEED, seed);
 
     // 目标节奏：每句 N 拍，每拍一个八分格（C4 = MIDI 60）
     fallbackTarget = [];
-    var cursor = 0;
     for (var i = 0; i < CFG.PHRASES; i += 1) {
+      var cursor = 0;
       var count = CFG.NOTES_PER_PHRASE[i];
       var notes = [];
       for (var k = 0; k < count; k += 1) {
@@ -583,54 +659,52 @@
       fallbackTarget.push({ phraseIndex: i, notes: notes, cursorEnd: cursor });
     }
 
-    runFallbackPhrase();
+    if (setPhase('RHYTHM_FALLBACK', null)) runFallbackPhrase();
   }
 
   function runFallbackPhrase() {
+    replayUsed = false;
     var target = fallbackTarget[phraseIndex];
-    setSub('LISTEN');
-    emit('melody:phraseStart', {
-      phraseIndex: phraseIndex,
-      notes: target.notes,
-      eighths: target.notes.map(function () { return 2; }),
-      familiar: false,
-      seed: seed
-    });
-
-    var leadInMs = 900;
-    later(function () {
-      setSub('COUNTDOWN');
-      countdownStep(3);
-    }, leadInMs);
+    if (!setSub('LISTEN')) return;
+    playListen(target.notes, target.notes.map(function () { return 2; }), false);
   }
 
   function beginFallbackRecord() {
-    setSub('RECORD');
+    if (!setSub('RECORD')) return;
     fallbackTaps = [];
     var target = fallbackTarget[phraseIndex];
     var startAt = monoNow();
-    emit('attempt:start', { phraseIndex: phraseIndex });
+    recordEndReason = null;
 
     // 海妖唱纯节奏（固定 C4），玩家跟着点
-    var base = Audio.ensureAudio().currentTime + 0.5;
+    var audioContext = Audio.getAudioContext();
+    var base = (audioContext ? audioContext.currentTime : 0) + 0.5;
     for (var i = 0; i < target.notes.length; i += 1) {
-      Audio.tick(base + (target.notes[i].startMs + 500) / 1000, i === 0);
+      Audio.tick(base + target.notes[i].startMs / 1000, i === 0);
     }
 
     fallbackTapHandler = function () {
       fallbackTaps.push({ t: monoNow() - startAt - 500 });
     };
-    global.document.addEventListener('pointerdown', fallbackTapHandler, { passive: true });
+    if (global.document) global.document.addEventListener('pointerdown', fallbackTapHandler, { passive: true });
+    // 兜底固定提前 500ms 给玩家准备；前端使用同样的提前量同步音块。
+    if (!emit('attempt:start', { phraseIndex: phraseIndex })) return;
 
-    later(function () { finishFallbackRecord(); }, Math.max(1500, target.notes.length * Audio.eighthMs() * 2 + 1200));
+    recordTimer = later(function () { finishFallbackRecord(); }, Math.max(1500, target.cursorEnd + 1200));
   }
 
   function finishFallbackRecord() {
+    if (phase !== 'RHYTHM_FALLBACK' || subPhase !== 'RECORD' || recordEndReason !== null) return;
+    recordEndReason = 'done';
+    cancelTimer(recordTimer);
+    recordTimer = null;
     if (fallbackTapHandler) {
       global.document.removeEventListener('pointerdown', fallbackTapHandler);
       fallbackTapHandler = null;
     }
-    setSub('ANALYZE');
+    Audio.stopPlayback();
+    if (!emit('attempt:end', { reason: 'done' })) return;
+    if (!setSub('ANALYZE')) return;
 
     var target = fallbackTarget[phraseIndex];
     var targetNotes = [];
@@ -657,10 +731,11 @@
   // ---------------------------------------------------------------- API（契约 C1）
 
   function init(options) {
+    cleanRun();
     options = options || {};
     if (options.storagePrefix && Store.KEYS) {
       // 前缀由 store.js 在加载时固定；这里只接受默认前缀，避免破坏既定键名
-      if (options.storagePrefix !== 'siren.') notice('STORAGE_FAILED');
+      if (options.storagePrefix !== 'siren.' && !notice('STORAGE_FAILED')) return Promise.resolve(getState());
     }
     if (options.seed !== undefined && options.seed !== null) {
       seed = Number(options.seed) || 0;
@@ -669,40 +744,42 @@
       seed = saved || (Math.floor(Math.random() * 900000) + 1000);
     }
     Store.set(Store.KEYS.SEED, seed);
-    if (!Store.available) notice('STORAGE_FAILED');
+    if (!Store.available && !notice('STORAGE_FAILED')) return Promise.resolve(getState());
 
+    phraseIndex = 0;
+    shipsSpawned = 0;
+    shipsWrecked = 0;
     setPhase('HOME', null);
     return Promise.resolve(getState());
   }
 
   function start() {
-    if (phase !== 'HOME' && phase !== 'SHARE_CARD' && phase !== 'RESULT') {
-      // 允许在结算页再次开始
-      if (phase !== 'RHYTHM_FALLBACK') { /* 其它状态忽略 */ }
-    }
-    clearTimers();
-    setPhase('PERM_REQUEST');
+    if (phase !== 'HOME' && phase !== 'SHARE_CARD' && phase !== 'RESULT') return;
+    cleanRun();
+    var token = runToken;
+    if (!setPhase('PERM_REQUEST', null)) return;
 
     // start() 必须由用户手势调用：在这里解锁 AudioContext（D4.1）
     try {
       Audio.ensureAudio();
     } catch (e) {
-      error('MIC_DENIED', 'AudioContext unavailable');
+      if (!error('MIC_DENIED', 'AudioContext unavailable')) return;
       later(function () { startFallbackRun(); }, 0);
       return;
     }
 
-    requestMic().then(function (ok) {
+    requestMic(token).then(function (ok) {
+      if (token !== runToken) return;
       if (ok) {
         startRun();
       } else {
         // 契约 C4：MIC_DENIED 是 error 级（前端文案"如果您拒绝了麦克风权限…"）。
         // ⚠️ 这里曾误发成 notice('MIC_DENIED')，导致前端按契约监听 error 事件时
         //    永远收不到权限失败通知。已修正为 error，并保持 level 与契约一致。
-        error('MIC_DENIED', 'getUserMedia rejected');
+        if (!error('MIC_DENIED', 'getUserMedia rejected')) return;
         // 契约 C4 另有 MIC_RETRY（notice，"再点一下让她开口"）：
         // 权限被系统重置或切后台回来时用它提示重试。此前该码从未被广播过。
-        notice('MIC_RETRY');
+        if (!notice('MIC_RETRY')) return;
         startFallbackRun();
       }
     });
@@ -714,25 +791,12 @@
     if (subPhase !== 'LISTEN') return false;
     replayUsed = true;
     var notes = phraseNotes();
-    emit('melody:phraseStart', {
-      phraseIndex: phraseIndex,
-      notes: notes,
-      eighths: currentPhrase().eighths.slice(),
-      familiar: !!currentPhrase().familiar,
-      seed: seed
-    });
-    Audio.playPhrase(notes);
+    playListen(notes, currentPhrase().eighths.slice(), !!currentPhrase().familiar);
     return true;
   }
 
   function abort() {
-    clearTimers();
-    if (fallbackTapHandler && global.document) {
-      global.document.removeEventListener('pointerdown', fallbackTapHandler);
-      fallbackTapHandler = null;
-    }
-    releaseMic();
-    Audio.release();
+    cleanRun();
     phraseIndex = 0;
     setPhase('HOME', null);
   }
