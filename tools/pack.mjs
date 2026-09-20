@@ -276,51 +276,59 @@ function validateStructure(files) {
   }
 }
 
-/** HTML 中引用的本地资源必须真实存在 */
+/** 页面引用的本地资源必须真实存在（html 属性 / css url() / js 里的 assets 与 data 路径） */
+function collectReferences(rel, text) {
+  // html 与 css 的相对路径以自身所在目录为基准；js 里的路径由浏览器按文档基址解析，
+  // 也就是包根目录 —— main.js 写 './assets/...' 指的是 assets/...，不是 js/assets/...。
+  const found = [];
+  const push = (raw, index, base) => {
+    const url = (raw || '').trim();
+    if (!url || url.startsWith('#') || /^(?:data:|blob:|https?:|\/\/)/i.test(url)) return;
+    const clean = url.split('?')[0].split('#')[0].replace(/^\.\//, '');
+    const target = base ? path.posix.normalize(path.posix.join(base, clean)) : path.posix.normalize(clean);
+    found.push({ url, target, index });
+  };
+  const dir = rel.includes('/') ? path.posix.dirname(rel) : '';
+  let m;
+  if (/\.(?:html|css)$/i.test(rel)) {
+    const attrRe = /(?:src|href)\s*=\s*["']([^"']+)["']/gi;
+    while ((m = attrRe.exec(text)) !== null) push(m[1], m.index, dir);
+    const cssRe = /url\(\s*(?:"([^"]+)"|'([^']+)'|([^)'"\s]+))\s*\)/gi;
+    while ((m = cssRe.exec(text)) !== null) push(m[1] || m[2] || m[3], m.index, dir);
+  }
+  if (/\.js$/i.test(rel)) {
+    // 只认打包进来的资源目录，避免把普通字符串当成路径。
+    const jsRe = /["'`]((?:\.{0,2}\/)?(?:assets|data)\/[^"'`]+)["'`]/gi;
+    while ((m = jsRe.exec(text)) !== null) push(m[1], m.index, '');
+  }
+  return found;
+}
+
 function validateReferences(files) {
   const present = new Set(files.map((f) => f.rel));
-  const refRe = /(?:src|href)\s*=\s*["']([^"']+)["']/gi;
+  const referenced = new Set(['index.html']);
 
   for (const f of files) {
-    if (!/\.(?:html|css)$/i.test(f.rel)) continue;
+    if (!/\.(?:html|css|js)$/i.test(f.rel)) continue;
     let text;
     try { text = fs.readFileSync(f.abs, 'utf8'); } catch { continue; }
 
-    if (/^\uFEFF/.test(text)) warn(f.rel, '文件含 BOM，建议去掉');
+    if (/^﻿/.test(text)) warn(f.rel, '文件含 BOM，建议去掉');
 
-    let m;
-    refRe.lastIndex = 0;
-    while ((m = refRe.exec(text)) !== null) {
-      const url = m[1].trim();
-      if (!url || url.startsWith('#') || url.startsWith('data:') || url.startsWith('blob:')) continue;
-      if (/^(?:https?:)?\/\//i.test(url)) continue; // 已由规则单独报错
-      const clean = url.split('?')[0].split('#')[0].replace(/^\.\//, '');
-      const target = f.rel.includes('/')
-        ? path.posix.normalize(path.posix.join(path.posix.dirname(f.rel), clean))
-        : path.posix.normalize(clean);
-      if (!present.has(target)) {
-        fail(f.rel, `引用的资源不存在于包内：${url}（期望 ./${target}）`, findLine(text, m.index));
+    for (const ref of collectReferences(f.rel, text)) {
+      referenced.add(ref.target);
+      if (!present.has(ref.target)) {
+        fail(f.rel, `引用的资源不存在于包内：${ref.url}（期望 ./${ref.target}）`, findLine(text, ref.index));
       }
     }
   }
 
   // 反向检查：孤儿资源（不是错误，只提示）
-  const referenced = new Set(['index.html']);
+  // 授权文本按 OFL 要求必须随包分发，本来就不会被页面引用，不当作冗余。
+  const shipUnreferenced = /(?:^|\/)(?:license|licence|ofl)[^/]*\.(?:json|txt|md)$/i;
   for (const f of files) {
-    if (!/\.(?:html|css)$/i.test(f.rel)) continue;
-    let text = '';
-    try { text = fs.readFileSync(f.abs, 'utf8'); } catch { continue; }
-    let m;
-    refRe.lastIndex = 0;
-    while ((m = refRe.exec(text)) !== null) {
-      const url = m[1].trim();
-      if (!url || url.startsWith('#') || /^(?:data:|blob:|https?:|\/\/)/i.test(url)) continue;
-      const clean = url.split('?')[0].split('#')[0].replace(/^\.\//, '');
-      referenced.add(path.posix.normalize(path.posix.join(path.posix.dirname(f.rel), clean)));
-    }
-  }
-  for (const f of files) {
-    if (!referenced.has(f.rel)) warn(f.rel, '包内未被任何 html/css 引用的文件（可能是冗余资源）');
+    if (referenced.has(f.rel) || shipUnreferenced.test(f.rel)) continue;
+    warn(f.rel, '包内未被任何 html/css/js 引用的文件（可能是冗余资源）');
   }
 }
 
