@@ -63,6 +63,7 @@ button:focus-visible { outline: 3px solid #183f65; outline-offset: 5px; }
   opacity: .08;
   pointer-events: none;
   background: repeating-linear-gradient(174deg, transparent 0 63px, #fff 65px 66px, transparent 69px 130px);
+  -webkit-mask-image: linear-gradient(transparent, #000, transparent);
   mask-image: linear-gradient(transparent, #000, transparent);
   animation: water-drift 8s ease-in-out infinite;
 }
@@ -77,25 +78,21 @@ button:focus-visible { outline: 3px solid #183f65; outline-offset: 5px; }
   pointer-events: none;
   transition: transform .8s ease, opacity .5s ease;
 }
+/* The atlas carries its own alpha (art-source/bake-alpha.py). It used to be paired with a
+   separate luminance mask, but older WebKit ignores mask-mode and reads -webkit-mask-image as
+   an alpha mask; the mask was opaque everywhere, so nothing was masked and the generator's
+   checkerboard showed through on iPad Safari. No CSS mask here means no mask semantics to get
+   wrong. */
 .siren-art, .share-siren {
   background-image: url("./assets/characters/siren-atlas.webp");
   background-repeat: no-repeat;
   background-size: 300% 100%;
   background-position: 0 0;
-  -webkit-mask-image: url("./assets/characters/siren-mask.webp");
-  mask-image: url("./assets/characters/siren-mask.webp");
-  mask-mode: luminance;
-  -webkit-mask-size: 300% 100%;
-  mask-size: 300% 100%;
-  -webkit-mask-repeat: no-repeat;
-  mask-repeat: no-repeat;
-  -webkit-mask-position: 0 0;
-  mask-position: 0 0;
 }
 .siren-art { width: 100%; height: 100%; transform-origin: 50% 70%; animation: siren-breathe 3.2s ease-in-out infinite; }
-.siren[data-pose="sing"] .siren-art { background-position: 50% 0; -webkit-mask-position: 50% 0; mask-position: 50% 0; }
-.siren[data-pose="listen"] .siren-art { background-position: 100% 0; -webkit-mask-position: 100% 0; mask-position: 100% 0; }
-.siren.is-submerged { transform: translateY(30%); opacity: .48; mask-image: linear-gradient(#000 0 45%, transparent 66%); }
+.siren[data-pose="sing"] .siren-art { background-position: 50% 0; }
+.siren[data-pose="listen"] .siren-art { background-position: 100% 0; }
+.siren.is-submerged { transform: translateY(30%); opacity: .48; -webkit-mask-image: linear-gradient(#000 0 45%, transparent 66%); mask-image: linear-gradient(#000 0 45%, transparent 66%); }
 .siren-glow {
   position: absolute;
   left: 32%; top: 62%; width: 60%; height: 24%;
@@ -301,18 +298,18 @@ button:focus-visible { outline: 3px solid #183f65; outline-offset: 5px; }
 #app[data-phase="BOOT"] .home-view { visibility: hidden; }
 
 .share-view { position: absolute; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 7px; overflow: hidden; padding: 16px; padding-top: max(16px, env(safe-area-inset-top, 0px)); padding-bottom: max(8px, env(safe-area-inset-bottom, 0px)); background: #f5f1e6; }
-.share-card { position: relative; isolation: isolate; container-type: inline-size; width: min(390px, calc((100dvh - 85px) * .6), calc(100vw - 32px)); aspect-ratio: 3 / 5; overflow: hidden; border: 3px solid var(--ink); border-radius: 24px; background: #c8effb; box-shadow: 5px 6px 0 #ccdcd9; text-align: center; }
+.share-card { --card-w: 390px; position: relative; isolation: isolate; container-type: inline-size; width: min(390px, calc((100dvh - 85px) * .6), calc(100vw - 32px)); aspect-ratio: 3 / 5; overflow: hidden; border: 3px solid var(--ink); border-radius: 24px; background: #c8effb; box-shadow: 5px 6px 0 #ccdcd9; text-align: center; }
 .share-sky { position: absolute; inset: 0; z-index: -1; background: #87dafd url("./assets/scenery/sea.webp") 14% bottom / auto 100% no-repeat; }
-.share-brand { margin: 7cqw 0 7cqw; font-size: 5.4cqw; font-weight: 700; letter-spacing: .055em; }
-.share-prefix { margin: 0; font-size: 5.4cqw; font-weight: 600; }
-.share-count { display: flex; justify-content: center; align-items: baseline; gap: 2cqw; margin: 0; font-weight: 700; line-height: 1.15; }
-.share-count strong { font-size: 27cqw; text-shadow: .65cqw .9cqw var(--cream); }
-.share-count span { font-size: 6.5cqw; }
-.share-line { position: relative; z-index: 3; margin: 3.5cqw 7cqw 0; font-size: 4.7cqw; font-weight: 600; line-height: 1.6; }
+.share-brand { margin: calc(var(--card-w) * 0.07) 0 calc(var(--card-w) * 0.07); font-size: calc(var(--card-w) * 0.054); font-weight: 700; letter-spacing: .055em; }
+.share-prefix { margin: 0; font-size: calc(var(--card-w) * 0.054); font-weight: 600; }
+.share-count { display: flex; justify-content: center; align-items: baseline; gap: calc(var(--card-w) * 0.02); margin: 0; font-weight: 700; line-height: 1.15; }
+.share-count strong { font-size: calc(var(--card-w) * 0.27); text-shadow: calc(var(--card-w) * 0.0065) calc(var(--card-w) * 0.009) var(--cream); }
+.share-count span { font-size: calc(var(--card-w) * 0.065); }
+.share-line { position: relative; z-index: 3; margin: calc(var(--card-w) * 0.035) calc(var(--card-w) * 0.07) 0; font-size: calc(var(--card-w) * 0.047); font-weight: 600; line-height: 1.6; }
 .share-sea { position: absolute; left: 0; right: 0; top: 46%; bottom: 0; background: transparent; }
 .share-sea canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
-.share-siren { position: absolute; left: 4%; bottom: 8%; width: 58%; aspect-ratio: 2 / 3; background-position: 50% 0; -webkit-mask-position: 50% 0; mask-position: 50% 0; }
-.share-bottom { position: absolute; bottom: 3.5cqw; z-index: 4; width: 100%; margin: 0; padding: 2.5cqw 0; background: #fffaf0ed; font-size: 4cqw; font-weight: 600; }
+.share-siren { position: absolute; left: 4%; bottom: 8%; width: 58%; aspect-ratio: 2 / 3; background-position: 50% 0; }
+.share-bottom { position: absolute; bottom: calc(var(--card-w) * 0.035); z-index: 4; width: 100%; margin: 0; padding: calc(var(--card-w) * 0.025) 0; background: #fffaf0ed; font-size: calc(var(--card-w) * 0.04); font-weight: 600; }
 .share-controls { display: flex; align-items: center; justify-content: center; gap: 16px; font-size: 14px; }
 .share-controls span { font-weight: 700; }.share-controls button { min-height: 36px; padding: 7px 12px; font-size: 14px; }
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
