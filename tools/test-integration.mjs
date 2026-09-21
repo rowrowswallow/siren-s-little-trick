@@ -118,7 +118,7 @@ function makeAudioStub() {
       disconnect() { return this; },
     }, extra);
   }
-  const created = { oscillators: 0, gains: 0, biquads: 0, convolvers: 0, buffers: 0, started: 0, stopped: 0 };
+  const created = { oscillators: 0, gains: 0, biquads: 0, convolvers: 0, buffers: 0, started: 0, stopped: 0, bufferSources: 0, lastBuffer: null };
 
   class FakeAudioContext {
     constructor() {
@@ -158,12 +158,28 @@ function makeAudioStub() {
       created.buffers += 1;
       const data = [];
       for (let i = 0; i < channels; i += 1) data.push(new Float32Array(length));
-      return {
+      const buf = {
         numberOfChannels: channels, length, sampleRate: 48000,
         getChannelData: (c) => data[c],
       };
+      created.lastBuffer = buf;
+      return buf;
     }
     createMediaStreamSource() { return node(); }
+    /** v1.1.0 终局回放玩家录音需要（PRD §7.5.1.4） */
+    createBufferSource() {
+      return node({
+        buffer: null,
+        playbackRate: param(1),
+        loop: false,
+        onended: null,
+        startCalls: 0,
+        stopCalls: 0,
+        startedAt: null,
+        start(when) { this.startCalls += 1; this.startedAt = when; created.bufferSources += 1; },
+        stop() { this.stopCalls += 1; },
+      });
+    }
     createAnalyser() {
       return node({
         fftSize: 2048,
@@ -556,7 +572,34 @@ check('game:finale 含 wreckedTotal/ending/seed（契约 C3）',
 check('ending 属于 A|B|C|D',
   finales.length === 1 && ['A', 'B', 'C', 'D'].indexOf(finales[0].payload.ending) >= 0,
   finales.length ? finales[0].payload.ending : '(无)');
-check('melody:replay 在终局广播（D3 全曲回放）', ofType('melody:replay').length === 1);
+// v1.1.0：终局改为回放玩家录音，melody:replay 不再用于终局（契约 C5）
+check('终局不再广播 melody:replay（v1.1.0 已取消全曲回放）',
+  ofType('melody:replay').length === 0,
+  'melody:replay ' + ofType('melody:replay').length + ' 次');
+
+const playerReplays = ofType('player:replay');
+check('终局广播 player:replay（回放玩家录音，契约 C5）',
+  playerReplays.length === 1,
+  playerReplays.length ? JSON.stringify({
+    durationMs: playerReplays[0].payload.durationMs,
+    parts: playerReplays[0].payload.parts.length
+  }) : '(无)');
+check('player:replay 载荷含 durationMs 与 parts[]（契约 C5）',
+  playerReplays.length === 1 &&
+  typeof playerReplays[0].payload.durationMs === 'number' &&
+  playerReplays[0].payload.durationMs > 0 &&
+  Array.isArray(playerReplays[0].payload.parts),
+  playerReplays.length ? `时长 ${playerReplays[0].payload.durationMs}ms，${playerReplays[0].payload.parts.length} 段` : '(无)');
+check('parts[] 每段含 phraseIndex/startMs/durationMs（契约 C5）',
+  playerReplays.length === 1 && playerReplays[0].payload.parts.every((p) =>
+    'phraseIndex' in p && 'startMs' in p && 'durationMs' in p),
+  playerReplays.length && playerReplays[0].payload.parts[0] ? JSON.stringify(playerReplays[0].payload.parts[0]) : '(无)');
+check('回放确实驱动了 AudioBufferSourceNode（不是空转）',
+  audioStub.created.bufferSources >= 1,
+  'createBufferSource 被调用 ' + audioStub.created.bufferSources + ' 次');
+check('回放缓冲只含有效演唱段（已去留白，比整段窗口短）',
+  playerReplays.length === 1 && playerReplays[0].payload.durationMs < 30000,
+  playerReplays.length ? playerReplays[0].payload.durationMs + 'ms（5 句整段上限 30s）' : '(无)');
 // ⚠️ 这里不断言绝对分数。合成麦克风桩不是忠实的音频仿真（多个测试间还会互相串数据），
 //    绝对分数的可信验证在 tools/test-score.mjs（完美演唱 = 100 分）。
 //    本测试只负责证明「pitch → segment → score → fleet → 事件」这条链是连通的。

@@ -37,6 +37,22 @@
    */
   var TUTORIAL_DEMO_SCORE = 70;
 
+  /**
+   * 单句录音缓存的样本上限（防内存失控）。
+   * 6s × 48kHz = 288000 样本；留 10% 余量取 320000（≈1.28MB/句，5 句约 6.4MB 上限）。
+   * 正常情况下录制会在 RECORD_MAX_MS(6s) 或更早结束，不会触顶。
+   */
+  var PCM_MAX_SAMPLES = 320000;
+
+  /** 采样间隔（与 pumpPitch 的定时器一致），用于按帧号换算毫秒 */
+  var PITCH_INTERVAL_MS = 50;
+  /** 去留白后总时长超过此值即 1.2 倍速（PRD §7.5.1.4 决策） */
+  var PCM_SPEEDUP_THRESHOLD_MS = 15000;
+  var PCM_SPEEDUP_RATE = 1.2;
+  // 回放状态
+  var replaySource = null;
+  var replayStopAt = 0;
+
   // ---------------------------------------------------------------- 状态
 
   var phase = 'BOOT';
@@ -79,6 +95,10 @@
   // v1.1.0 新手引导关（PRD §7.5.1.2）
   var tutorialDone = false;     // 本局是否已走完引导
   var tutorialAttempts = 0;     // 引导关重试次数（仅用于诊断）
+  // v1.1.0 终局回放玩家录音（PRD §7.5.1.4）：每句缓存一段原始 PCM
+  var recordPcm = null;         // 本句的 PCM 累积（Float32Array 数组）
+  var recordPcmLen = 0;         // 本句已累积的样本数
+  var pcmPhrases = [];          // 各句缓存：{ pcm, sampleRate, validFrom, validTo }
   var recordHadVoice = false;
   var lastVoicedAt = 0;
   var lastPitchSent = 0;
@@ -310,6 +330,8 @@
     scoreSum = 0;
     phraseIndex = 0;
     tutorialAttempts = 0;
+    pcmPhrases = [];          // v1.1.0：清空上一局的录音缓存
+    stopPlayerRecording();
     lastEnding = null;
     lastTitleRevealed = null;
     Store.set(Store.KEYS.SEED, seed);
@@ -407,10 +429,14 @@
     recordJudged = 0;
     recordJudgements = [];
 
+    // v1.1.0 原始 PCM 缓存（供终局回放，PRD §7.5.1.4）
+    recordPcm = [];
+    recordPcmLen = 0;
+
     if (!emit('attempt:start', { phraseIndex: phraseIndex })) return;
 
     // D11：音高实时数据每 50ms 推一次
-    pitchTimer = global.setInterval(pumpPitch, 50);
+    pitchTimer = global.setInterval(pumpPitch, PITCH_INTERVAL_MS);
 
     // 上限 6s；静默 3s 中止（D3）
     recordTimer = later(function () { finishRecord('timeout'); }, CFG.RECORD_MAX_MS);
@@ -494,6 +520,14 @@
       conf: r.conf,
       voiced: voiced
     })) return;
+
+    // v1.1.0：累积原始 PCM（供终局回放玩家录音，PRD §7.5.1.4）
+    // ⚠️ 存**原始**样本而不是增益后的：回放要放玩家真实的声音。
+    //    内存预算见 §7.5.1.5：每句最多 6s × 48kHz × 4B ≈ 1.1MB，5 句约 5.5MB（已确认接受）。
+    if (recordPcm && recordPcmLen + mic.buf.length <= PCM_MAX_SAMPLES) {
+      recordPcm.push(new Float32Array(mic.buf));   // 必须复制：mic.buf 会被反复覆写
+      recordPcmLen += mic.buf.length;
+    }
 
     // v1.1.0：逐音档位反馈（契约 C5）
     pumpNoteJudgements(t);
@@ -594,9 +628,14 @@
 
     // ---- 新手引导关：不计分、不产生战果、可无限重试（PRD §7.5.1.2）
     if (phase === 'TUTORIAL') {
+      recordPcm = null;        // 引导关不参与终局回放
       finishTutorialAttempt(score);
       return;
     }
+
+    // 本句 PCM 收尾（供终局回放玩家录音，PRD §7.5.1.4）
+    stashPhrasePcm(recordFrames, recordFrames.length);
+    recordPcm = null;
 
     scoreSum += score;
     later(function () { pullWave(score); }, 120);
@@ -714,6 +753,125 @@
     return true;
   }
 
+  // ---------------------------------------------------------------- 终局回放（v1.1.0）
+
+  /**
+   * 求本句"有效演唱段"在 PCM 里的样本区间（PRD §7.5.1.4 要求去掉留白）。
+   *
+   * 判据：某帧有音高（`hz > 0`）或电平明显高于底噪 → 视为有效。
+   * 起 = 第一个有效帧的**帧首**；止 = 最后一个有效帧的**帧尾**。
+   * 前后各留 `PAD_MS` 的余量，避免把起音的辅音切掉。
+   *
+   * 为什么不用"整段 6 秒窗口"拼接：那样 5 句会有大量静音留白，
+   * 回放又长又散；裁掉后通常只剩 1–3 秒/句，5 句拼起来接近真实演唱长度。
+   */
+  function validRangeOf(frames, samplesPerFrame, totalSamples) {
+    var PAD_MS = 80;
+    var padFrames = Math.max(1, Math.round(PAD_MS / PITCH_INTERVAL_MS));
+    var first = -1;
+    var last = -1;
+    for (var i = 0; i < frames.length; i += 1) {
+      var f = frames[i];
+      var active = f.hz > 0 || (mic.noiseFloor > 0 && f.rms > mic.noiseFloor * 3);
+      if (!active) continue;
+      if (first < 0) first = i;
+      last = i;
+    }
+    if (first < 0) return { from: 0, to: 0 };   // 整句没唱
+
+    var fromSample = Math.max(0, (first - padFrames) * samplesPerFrame);
+    var toSample = Math.min(totalSamples, (last + 1 + padFrames) * samplesPerFrame);
+    if (toSample <= fromSample) return { from: 0, to: 0 };
+    return { from: fromSample, to: toSample };
+  }
+
+  /** 本句录音的 PCM 收尾：把累积的帧拼成一条，算出有效区间，存入 pcmPhrases */
+  function stashPhrasePcm(frames, uptoFrames) {
+    if (!recordPcm || recordPcmLen === 0) return;
+    var sr = Audio.ensureAudio().sampleRate;
+
+    var merged = new Float32Array(recordPcmLen);
+    var off = 0;
+    for (var i = 0; i < recordPcm.length; i += 1) {
+      merged.set(recordPcm[i], off);
+      off += recordPcm[i].length;
+    }
+    var samplesPerFrame = recordPcm[0].length;
+    var range = validRangeOf(frames, samplesPerFrame, merged.length);
+    if (range.to <= range.from) return;    // 没唱出东西，不留
+
+    pcmPhrases.push({
+      pcm: merged,
+      sampleRate: sr,
+      from: range.from,
+      to: range.to,
+      phraseIndex: phraseIndex
+    });
+  }
+
+  /**
+   * 播放玩家录音（终局）。返回实际播放时长（毫秒），失败返回 0。
+   *
+   * ⚠️ 调用前必须已经 `releaseMic()`——否则麦克风会把回放当成新输入（PRD §7.5.1.4 技术点 1）。
+   *    本函数只负责播放，不碰麦克风生命周期。
+   */
+  function playPlayerRecording() {
+    if (!pcmPhrases.length) return 0;
+    var ctx = Audio.getAudioContext();
+    if (!ctx || ctx.state !== 'running') return 0;
+
+    // 计算有效总样本数
+    var total = 0;
+    for (var i = 0; i < pcmPhrases.length; i += 1) {
+      total += (pcmPhrases[i].to - pcmPhrases[i].from);
+    }
+    if (total <= 0) return 0;
+
+    var sr = pcmPhrases[0].sampleRate;
+    var buf = ctx.createBuffer(1, total, sr);
+    var ch = buf.getChannelData(0);
+    var cursor = 0;
+    var parts = [];
+    var srcParts = [];
+    for (var j = 0; j < pcmPhrases.length; j += 1) {
+      var p = pcmPhrases[j];
+      var len = p.to - p.from;
+      ch.set(p.pcm.subarray(p.from, p.to), cursor);
+      srcParts.push({ phraseIndex: p.phraseIndex, startMs: cursor / sr * 1000, durationMs: len / sr * 1000 });
+      parts.push({ phraseIndex: p.phraseIndex, startMs: cursor / sr * 1000, durationMs: len / sr * 1000 });
+      cursor += len;
+    }
+
+    var src = ctx.createBufferSource();
+    src.buffer = buf;
+    // 去掉留白后仍超长则 1.2 倍速（PRD §7.5.1.4）
+    var naturalMs = total / sr * 1000;
+    src.playbackRate.value = naturalMs > PCM_SPEEDUP_THRESHOLD_MS ? PCM_SPEEDUP_RATE : 1;
+    var gain = ctx.createGain();
+    gain.gain.value = 1;
+    src.connect(gain);
+    gain.connect(ctx.destination);
+
+    var t0 = ctx.currentTime + 0.06;
+    src.start(t0);
+    var playedMs = naturalMs / src.playbackRate.value;
+    replayStopAt = t0 + playedMs / 1000 + 0.05;
+    replaySource = src;
+
+    if (!emit('player:replay', { durationMs: Math.round(playedMs), parts: srcParts })) return 0;
+    return playedMs;
+  }
+
+  /** 停止玩家录音回放（abort / 重开时调用，避免残留播放） */
+  function stopPlayerRecording() {
+    if (replaySource) {
+      try { replaySource.stop(); } catch (e) { /* 已停止 */ }
+      try { replaySource.disconnect(); } catch (e) { /* 忽略 */ }
+      replaySource = null;
+    }
+    replayStopAt = 0;
+  }
+
   // ---------------------------------------------------------------- 船队波次
 
   /** D9：生成 20 条新船 → 逐船判定 → 广播入场与触礁 */
@@ -784,7 +942,7 @@
 
   function startFinale() {
     var fallback = phase === 'RHYTHM_FALLBACK';
-    releaseMic();
+    releaseMic();               // ⚠️ 必须在回放前：否则麦克风会把回放当成新输入
     Audio.stopPlayback();
     if (!setPhase('FINALE', null)) return;
     if (!emit('game:finale', {
@@ -794,36 +952,24 @@
     })) return;
     lastEnding = Fleet.decideEnding(shipsWrecked);
 
-    // 全曲回放（D3：REPLAY 3s 全曲回放）
-    var source = [];
-    for (var i = 0; i < CFG.PHRASES; i += 1) {
-      var notes = fallback ? fallbackTarget[i].notes : Melody.toNotes(phrases[i], CFG.BPM);
-      for (var j = 0; j < notes.length; j += 1) {
-        source.push(notes[j]);
-      }
+    // v1.1.0：终局改为回放**玩家自己的录音**（PRD §7.5.1.4）。
+    //   原「海妖全曲加速回放」已取消——`melody:replay` 不再在此发出。
+    //   兜底模式没有录音（是打拍子），直接进 RESULT。
+    var replayMs = 0;
+    if (!fallback && pcmPhrases.length) {
+      replayMs = playPlayerRecording();
     }
-    // 25 个音完整保留顺序；最短 100ms 保证可辨，其余时间按原时值分配。
-    // 这是约 3 秒的快速回顾，不能用 i * 当句音数定位（3/4/5/6/7 会制造空洞）。
-    var all = [];
-    var sourceDuration = source.reduce(function (sum, n) { return sum + n.durationMs; }, 0);
-    var remainingMs = Math.max(0, 3000 - source.length * 100);
-    var cursor = 0;
-    for (var k = 0; k < source.length; k += 1) {
-      var duration = 100 + remainingMs * source[k].durationMs / sourceDuration;
-      all.push({ midi: source[k].midi, startMs: cursor, durationMs: duration, degree: source[k].degree });
-      cursor += duration;
-    }
-    if (!emit('melody:replay', { notes: all })) return;
-    // 快速回顾关闭长混响尾音，结果页按实际排程结束时间切换。
-    var playedS = Audio.playPhrase(all, { gain: 0.12, reverb: false });
 
-    var replayMs = Math.max(cursor, playedS * 1000) + 100;
+    // 若因环境原因（AudioContext 未 running 等）没能回放，也照常进结算，
+    // 不能因为回放失败把玩家卡在 FINALE。
+    var waitMs = replayMs > 0 ? replayMs + 160 : 0;
     later(function () {
+      stopPlayerRecording();
       Audio.release();
       if (!setPhase('RESULT', null)) return;
       Store.commitRun(shipsWrecked, scoreSum);
       later(function () { setPhase('SHARE_CARD', null); }, 400);
-    }, replayMs);
+    }, waitMs);
   }
 
   // ---------------------------------------------------------------- 兜底模式（D10）
@@ -1002,6 +1148,10 @@
 
   function abort() {
     cleanRun();
+    // v1.1.0：中止时也要停掉可能正在播放的录音回放，并释放 PCM 缓存
+    stopPlayerRecording();
+    pcmPhrases = [];
+    recordPcm = null;
     phraseIndex = 0;
     setPhase('HOME', null);
   }
