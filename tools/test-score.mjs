@@ -246,6 +246,66 @@ check('哼唱（起音晚 80ms）与真唱无显著差异', Math.abs(hum - norma
 const humLate = Score._scoreAttempt(target, sing(target, { humOffsetMs: 150 })).score;
 check('哼唱起音晚 150ms 仍无惩罚', Math.abs(humLate - normal) <= 5, `${humLate}`);
 
+// ---------------------------------------------------------------- 6b. 逐音档位（v1.1.0 / 契约 C5）
+
+console.log('');
+console.log('【6b】逐音档位判定 judgeNotes（v1.1.0 / 契约 C5）');
+
+const shift = (notes, cents, onsetMs, octave) => notes.map((n) => {
+  const hz = Pitch.midiToHz(n.midi + (octave || 0)) * Math.pow(2, cents / 1200);
+  return {
+    hz: hz,
+    midi: Pitch.hzToMidi(hz),
+    startMs: n.onsetMs + onsetMs,
+    onsetMs: n.onsetMs + onsetMs,
+    durationMs: n.durationMs,
+  };
+});
+const tiersOf = (actual) => Score._judgeNotes(target, actual).map((e) => e.tier);
+const allTier = (arr, t) => arr.every((x) => x === t);
+
+const jPerfect = tiersOf(shift(target, 0, 0, 0));
+check('完美演唱 → 全部 perfect', allTier(jPerfect, 'perfect'), jPerfect.join(', '));
+
+const jLowOct = tiersOf(shift(target, 0, 0, -12));
+check('低八度演唱 → 全部 perfect（P2 相对音高）', allTier(jLowOct, 'perfect'), jLowOct.join(', '));
+const jHighOct = tiersOf(shift(target, 0, 0, 12));
+check('高八度演唱 → 全部 perfect', allTier(jHighOct, 'perfect'), jHighOct.join(', '));
+
+const jCents30 = tiersOf(shift(target, 30, 0, 0));
+check('偏低 30 音分（容差内）→ 全部 perfect', allTier(jCents30, 'perfect'), jCents30.join(', '));
+
+const jLate250 = tiersOf(shift(target, 0, 250, 0));
+check('整体晚 250ms → 降为 good', allTier(jLate250, 'good'), jLate250.join(', '));
+
+const jCents150 = tiersOf(shift(target, 150, 0, 0));
+check('偏低 150 音分 → 降为 good', allTier(jCents150, 'good'), jCents150.join(', '));
+
+const jCents400 = tiersOf(shift(target, 400, 0, 0));
+check('偏低 400 音分 → 全部 miss', allTier(jCents400, 'miss'), jCents400.join(', '));
+
+// 漏音
+const dropped = shift(target, 0, 0, 0).filter((_, i) => i !== 3);
+const jDrop = Score._judgeNotes(target, dropped);
+check('漏唱第 4 个音 → 该音判 miss，其余仍 perfect',
+  jDrop[3].tier === 'miss' && jDrop[3].actualMidi !== null || jDrop[3].tier === 'miss',
+  jDrop.map((e) => e.tier).join(', '));
+
+// 载荷完整性
+const jd0 = Score._judgeNotes(target, shift(target, 0, 0, 0))[0];
+check('判定结果含 index/targetMidi/actualMidi/accuracy/tier/t（契约 C5）',
+  'index' in jd0 && 'targetMidi' in jd0 && 'actualMidi' in jd0 &&
+  'accuracy' in jd0 && 'tier' in jd0 && 't' in jd0,
+  JSON.stringify(jd0));
+check('accuracy 落在 0–1', jd0.accuracy >= 0 && jd0.accuracy <= 1, String(jd0.accuracy));
+check('只判单个音（onlyIndex）时只返回一条',
+  Score._judgeNotes(target, shift(target, 0, 0, 0), { onlyIndex: 2 }).length === 1);
+
+// 档位与总分同源：全 perfect 的演唱，四维总分也应当很高
+const jScore = Score._scoreAttempt(target, shift(target, 0, 0, 0)).score;
+check('档位与总分同源（全 perfect → 总分也高）', jScore >= 95,
+  `全 perfect 时总分 ${jScore}`);
+
 // ---------------------------------------------------------------- 7. 零随机 / 确定性
 
 console.log('');

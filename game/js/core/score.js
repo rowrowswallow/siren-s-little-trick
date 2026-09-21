@@ -68,6 +68,20 @@
     return x;
   }
 
+  /**
+   * 音分差折叠到 [0, 600]（八度无关）。
+   *
+   * ⚠️ 必须用 `((x % 1200) + 1200) % 1200`，**不能只写 `x % 1200`**：
+   *    JS 的 % 对负数返回负余数，于是"低八度演唱"会得到负数音分，
+   *    在取最小值配对时负数永远胜出，把真正正确的候选挤掉（实测把 perfect 判成了 miss）。
+   *    `align()` 里原本写对，`judgeNotes()` 里漏了这一步，故统一抽到这里。
+   */
+  function foldCents(cents) {
+    var f = ((cents % 1200) + 1200) % 1200;
+    if (f > 600) f = 1200 - f;
+    return f;
+  }
+
   /** 取音符的起音时刻（兼容 onsetMs / startMs 两种字段名） */
   function onsetOf(n) {
     if (n.onsetMs !== undefined) return n.onsetMs;
@@ -410,6 +424,108 @@
     return { score: Math.round(100 * scoreRhythm(target, actual, pairs)) };
   }
 
+  // ---------------------------------------------------------------- v1.1.0 逐音档位
+
+  /**
+   * 逐音档位阈值（PRD §7.5.1.1 / 契约 C5）。
+   *
+   * ⚠️ 刻意复用打分器的容差参数，让"档位"与"最终分数"同源：
+   *    perfect 用 CENTS_TOLERANT（满分线）、miss 用 CENTS_ZERO（零分线）、
+   *    great / good 取两者之间的分档。
+   *    否则会出现"四个音全 perfect 但总分很低"的矛盾，玩家会觉得系统在骗人。
+   */
+  var NOTE_TIERS = [
+    { name: 'perfect', cents: 50, onsetMs: 150 },
+    { name: 'great', cents: 100, onsetMs: 220 },
+    { name: 'good', cents: 200, onsetMs: 400 }
+  ];
+
+  /**
+   * 把一条目标音与其对应的实际音，转成档位判定。
+   * @returns {{targetMidi:number, actualMidi:number|null, accuracy:number, tier:string}}
+   */
+  function tierOf(targetMidi, actualMidi, cents, onsetDiff) {
+    if (actualMidi === null) {
+      return { targetMidi: targetMidi, actualMidi: null, accuracy: 0, tier: 'miss' };
+    }
+    var absCents = Math.abs(cents);
+    var absOnset = Math.abs(onsetDiff);
+    var tier = 'miss';
+    for (var i = 0; i < NOTE_TIERS.length; i += 1) {
+      if (absCents <= NOTE_TIERS[i].cents && absOnset <= NOTE_TIERS[i].onsetMs) {
+        tier = NOTE_TIERS[i].name;
+        break;
+      }
+    }
+    // 连续相似度：两个维度各自线性衰减后取较小者
+    var aCents = linearScore(cents, CFG.CENTS_TOLERANT, CFG.CENTS_ZERO);
+    var aOnset = linearScore(onsetDiff, CFG.RHYTHM_TOL_MS, CFG.RHYTHM_ZERO_MS);
+    return {
+      targetMidi: targetMidi,
+      actualMidi: actualMidi,
+      accuracy: Math.min(aCents, aOnset),
+      tier: tier
+    };
+  }
+
+  /**
+   * 逐音判定（供 `attempt:note` 事件使用）。
+   *
+   * @param {Array} target    目标音符序列（`_buildTarget` 的产物）
+   * @param {Array} actual    实际切分出的音符
+   * @param {Object} [opts]
+   *   opts.onlyIndex  只判这一个目标音（演唱过程中逐音推进时用）
+   *   opts.offset     补偿的移调半音（通常传 `_estimateTranspose` 的结果）
+   *   opts.maxCents   配对上限：音分差超过此值视为没唱（默认用 CENTS_ZERO）
+   * @returns {Array<{index, targetMidi, actualMidi, accuracy, tier, t}>}
+   */
+  function judgeNotes(target, actual, opts) {
+    opts = opts || {};
+    var offset = opts.offset || 0;
+    var maxCents = opts.maxCents || CFG.CENTS_ZERO;
+    var out = [];
+    var lo = opts.onlyIndex === undefined ? 0 : opts.onlyIndex;
+    var hi = opts.onlyIndex === undefined ? target.length - 1 : opts.onlyIndex;
+
+    for (var i = lo; i <= hi; i += 1) {
+      if (i < 0 || i >= target.length) continue;
+      var tn = target[i];
+      var tStart = onsetOf(tn);
+      var tEnd = tStart + (tn.durationMs || 0);
+      var expectHz = Pitch.midiToHz(tn.midi + offset);
+
+      // 在目标音的窗口（含少量容差）里找代价最小的实际音
+      var best = null;
+      var bestCost = Infinity;
+      for (var j = 0; j < actual.length; j += 1) {
+        var an = actual[j];
+        var aStart = onsetOf(an);
+        var aEnd = aStart + (an.durationMs || 0);
+        // 时间重叠判据
+        if (aEnd < tStart - CFG.RHYTHM_ZERO_MS || aStart > tEnd + CFG.RHYTHM_ZERO_MS) continue;
+        // 音高用八度折叠后的音分差（低八度演唱不该判 miss）
+        var folded = foldCents(Pitch.centsBetween(an.hz, expectHz));
+        if (folded > maxCents) continue;
+        var cost = folded + Math.abs(aStart - tStart) * 0.35;
+        if (cost < bestCost) { bestCost = cost; best = an; }
+      }
+
+      if (best) {
+        var cf = foldCents(Pitch.centsBetween(best.hz, expectHz));
+        var tr = tierOf(tn.midi, best.midi, cf, onsetOf(best) - tStart);
+        tr.index = i;
+        tr.t = tStart + (tn.durationMs || 0);   // 判定时刻 = 该音结束时刻
+        out.push(tr);
+      } else {
+        var miss = tierOf(tn.midi, null, Infinity, Infinity);
+        miss.index = i;
+        miss.t = tStart + (tn.durationMs || 0);
+        out.push(miss);
+      }
+    }
+    return out;
+  }
+
   Siren.Score = {
     _scoreAttempt: scoreAttempt,
     _scoreAttemptVerbose: _scoreAttemptVerbose,
@@ -418,6 +534,8 @@
     _computeTransposition: computeTransposition,
     _estimateTranspose: estimateTranspose,
     _buildTarget: buildTarget,
+    _judgeNotes: judgeNotes,
+    _tiers: function () { return JSON.parse(JSON.stringify(NOTE_TIERS)); },
     _config: function () { return JSON.parse(JSON.stringify(CFG)); }
   };
-})(typeof window !== 'undefined' ? window : globalThis);
+})(typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : {}));

@@ -253,6 +253,42 @@ for (const f of jsFiles) {
 }
 if (!diagHits) ok('全部 js 文件的代码部分零命中（注释不计）');
 
+// ---------------------------------------------------------------- 8. 容器兼容基线
+
+console.log('');
+console.log('【7】Chrome 61 兼容基线（小工具容器最低要求）');
+// 官方能力清单原文：
+//   「小工具最低兼容 Android 8.1 出厂 Chrome / WebView 61」
+//   「最终交付代码须编译到 ES2017 / Chrome 61；更高版本语法由构建工具转译」
+//   「使用 Chrome 61 基线外的高级 Web API 或 CSS 能力前，必须先检测是否支持」
+// 本项目不做构建转译（手写 ES5 风格），所以用静态扫描把这条钉死。
+const ES_FORBIDDEN = [
+  { re: /\?\.[a-zA-Z_$\[(]/, name: '可选链 ?.（ES2020）', fix: '改写为逐级判空：a && a.b && a.b.c' },
+  { re: /\?\?/, name: '空值合并 ??（ES2020）', fix: '改写为 a != null ? a : b' },
+  { re: /\|\|=|&&=|\?\?=/, name: '逻辑赋值（ES2021）', fix: '改写为显式赋值' },
+  { re: /\bglobalThis\b/, name: 'globalThis（ES2020）', fix: "用 typeof self !== 'undefined' ? self : {} 兜底" },
+  { re: /\bBigInt\b|\d+n\b/, name: 'BigInt（ES2020）', fix: '移除' },
+  { re: /Object\.fromEntries/, name: 'Object.fromEntries（ES2019）', fix: '手写 reduce' },
+  { re: /\.flat\(|\.flatMap\(/, name: 'Array.flat/flatMap（ES2019）', fix: '手写 reduce/concat' },
+  { re: /Promise\.allSettled/, name: 'Promise.allSettled（ES2020）', fix: '用 Promise.all + catch' },
+  { re: /\.replaceAll\(/, name: 'String.replaceAll（ES2021）', fix: '用 replace + 全局正则' },
+  { re: /catch\s*\{/, name: 'catch 省略绑定（ES2019）', fix: '写成 catch (e)' },
+  { re: /#\w+\s*[=;(]/, name: 'class 私有字段（ES2022）', fix: '用闭包变量替代' },
+  { re: /\bstatic\s*\{/, name: 'class 静态初始化块（ES2022）', fix: '移除' },
+];
+let baselineHits = 0;
+for (const f of jsFiles) {
+  const code = stripComments(fs.readFileSync(f, 'utf8'));
+  for (const rule of ES_FORBIDDEN) {
+    if (rule.re.test(code)) {
+      bad(`${rel(f)} 含 ${rule.name} —— Chrome 61 不支持。${rule.fix}`);
+      baselineHits += 1;
+    }
+  }
+}
+if (!baselineHits) ok(`${jsFiles.length} 个 js 文件均不含 ES2018+ 语法`);
+info('这条只覆盖本仓库的 js；前端若用新语法需自行转译或做能力检测');
+
 // ---------------------------------------------------------------- 汇总
 
 console.log('');

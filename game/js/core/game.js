@@ -63,6 +63,10 @@
   var recordDuration = 0;
   var recordEndReason = null;
   var recordTargetEnd = 0;
+  // v1.1.0 逐音档位反馈（契约 C5）
+  var recordTarget = null;      // 本句目标音序列
+  var recordJudged = 0;         // 已判到第几个音（不含末音）
+  var recordJudgements = [];    // 已判结果（末音在 finishRecord 里补）
   var recordHadVoice = false;
   var lastVoicedAt = 0;
   var lastPitchSent = 0;
@@ -373,6 +377,15 @@
       Audio.cue(notes[i].midi, base + notes[i].startMs / 1000);
     }
 
+    // v1.1.0 逐音档位反馈（契约 C5）：预建目标序列 + 进度游标
+    recordTarget = Score._buildTarget(
+      currentPhrase(),
+      (function (sc) { return function (d) { return Melody.toMidi(d, sc); }; })(currentPhrase().scale),
+      CFG.BPM
+    );
+    recordJudged = 0;
+    recordJudgements = [];
+
     if (!emit('attempt:start', { phraseIndex: phraseIndex })) return;
 
     // D11：音高实时数据每 50ms 推一次
@@ -380,6 +393,40 @@
 
     // 上限 6s；静默 3s 中止（D3）
     recordTimer = later(function () { finishRecord('timeout'); }, CFG.RECORD_MAX_MS);
+  }
+
+  /**
+   * 逐音推进判定（v1.1.0 / 契约 C5）。
+   *
+   * 每帧检查：录音时间是否已越过某个目标音的**结束时刻**；越过了就判它并广播。
+   * 判定用的是**到目前为止**采集到的帧（现场切分），因此玩家一唱完这个音，
+   * 探针滑到那里就能立刻弹出档位。
+   *
+   * 末音（最后一个）不在这里判——它的结束时刻之后可能还有尾音，
+   * 统一留到 `finishRecord` 用完整数据补判，避免"尾音还没唱完就判 miss"。
+   */
+  function pumpNoteJudgements(t) {
+    if (!recordTarget || !recordTarget.length) return;
+    var lastIdx = recordTarget.length - 1;
+    while (recordJudged < lastIdx) {
+      var tn = recordTarget[recordJudged];
+      var endMs = tn.onsetMs + tn.durationMs;
+      if (t < endMs) break;
+
+      // 只切分"到这个音结束为止"的帧，避免把后面的音也算进来
+      var upto = [];
+      for (var i = 0; i < recordFrames.length; i += 1) {
+        if (recordFrames[i].t <= endMs) upto.push(recordFrames[i]);
+      }
+      var seg = Segment.segment(upto, { noiseFloor: mic.noiseFloor });
+      var jd = Score._judgeNotes(recordTarget, seg.notes, { onlyIndex: recordJudged })[0];
+      if (jd) {
+        jd.t = endMs;   // 契约 C5：判定时刻 = 该音结束时刻（相对 attempt:start）
+        recordJudgements.push(jd);
+        if (!emit('attempt:note', jd)) return;
+      }
+      recordJudged += 1;
+    }
   }
 
   function pumpPitch() {
@@ -426,6 +473,9 @@
       conf: r.conf,
       voiced: voiced
     })) return;
+
+    // v1.1.0：逐音档位反馈（契约 C5）
+    pumpNoteJudgements(t);
 
     // 短乐句唱完就结算，不能继续等待到「静默 3 秒」把已唱出的内容归零。
     // 完全没有输入仍沿用下面的静默中止；600ms 留出跟唱反应时间。
@@ -497,6 +547,20 @@
         CFG.BPM);
       var result = Score._scoreAttempt(target, seg.notes);
       score = result.score;
+
+      // v1.1.0：补判末音（契约 C5）。前面已逐音判到倒数第二个，
+      // 末音的结束时刻之后可能还有尾音，所以等录音真正结束再用完整数据判。
+      if (recordTarget && recordTarget.length &&
+          recordJudged === recordTarget.length - 1) {
+        var lastJd = Score._judgeNotes(recordTarget, seg.notes, { onlyIndex: recordJudged })[0];
+        if (lastJd) {
+          lastJd.t = recordTargetEnd;
+          recordJudgements.push(lastJd);
+          if (!emit('attempt:note', lastJd)) return;
+        }
+        recordJudged += 1;
+      }
+
       // 连续低置信度 → LOW_CONFIDENCE（契约 C4），不扣分
       var lowConf = 0;
       for (var i = 0; i < recordFrames.length; i += 1) {
@@ -816,4 +880,4 @@
     _beginFallbackRecord: beginFallbackRecord,
     _config: CFG
   };
-})(typeof window !== 'undefined' ? window : globalThis);
+})(typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : {}));

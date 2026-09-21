@@ -328,8 +328,8 @@ Siren.Audio.cue = function () {};
 const events = [];
 const EVENT_TYPES = [
   'state:change', 'melody:phraseStart', 'melody:titleReveal', 'attempt:countdown',
-  'attempt:start', 'attempt:pitch', 'attempt:end', 'ship:in', 'ship:wrecked',
-  'phrase:result', 'game:finale', 'melody:replay', 'notice', 'error',
+  'attempt:start', 'attempt:pitch', 'attempt:note', 'attempt:end', 'ship:in', 'ship:wrecked',
+  'phrase:result', 'game:finale', 'melody:replay', 'player:replay', 'notice', 'error',
 ];
 for (const t of EVENT_TYPES) Siren.on(t, (payload) => events.push({ type: t, payload, at: clock.now() }));
 const ofType = (t) => events.filter((e) => e.type === t);
@@ -487,6 +487,62 @@ const ends = ofType('attempt:end');
 check('attempt:end reason 属于 done|silence|timeout（契约 C3）',
   ends.length === 5 && ends.every((e) => ['done', 'silence', 'timeout'].indexOf(e.payload.reason) >= 0),
   ends.map((e) => e.payload.reason).join(', '));
+
+// ---- v1.1.0 逐音档位反馈（契约 C5）
+const noteJudges = ofType('attempt:note');
+const VALID_TIERS = ['perfect', 'great', 'good', 'miss'];
+check('attempt:note 每句每个音各一次（契约 C5）',
+  noteJudges.length === 25,   // 3+4+5+6+7
+  `实际 ${noteJudges.length} 次`);
+check('attempt:note 载荷含 index/targetMidi/actualMidi/accuracy/tier/t（契约 C5）',
+  noteJudges.length > 0 && noteJudges.every((e) =>
+    'index' in e.payload && 'targetMidi' in e.payload && 'actualMidi' in e.payload &&
+    'accuracy' in e.payload && 'tier' in e.payload && 't' in e.payload),
+  noteJudges.length ? JSON.stringify(noteJudges[0].payload) : '(无)');
+check('tier 属于 perfect|great|good|miss',
+  noteJudges.every((e) => VALID_TIERS.indexOf(e.payload.tier) >= 0),
+  [...new Set(noteJudges.map((e) => e.payload.tier))].join(', '));
+check('accuracy 落在 0–1 且 miss 时为 0',
+  noteJudges.every((e) => e.payload.accuracy >= 0 && e.payload.accuracy <= 1 &&
+    (e.payload.tier !== 'miss' || e.payload.accuracy === 0)),
+  '范围 ' + Math.min(...noteJudges.map((e) => e.payload.accuracy)).toFixed(2) + '–' +
+  Math.max(...noteJudges.map((e) => e.payload.accuracy)).toFixed(2));
+check('index 在每句内从 0 连续递增（每句一条序列）',
+  (() => {
+    const byPhrase = {};
+    for (const e of noteJudges) {
+      // 用 t 的分段无法可靠划分，改为校验全局每 3/4/5/6/7 分组
+      const key = e.payload.index;
+      byPhrase[key] = (byPhrase[key] || 0) + 1;
+    }
+    // 3 音句贡献 index 0..2 各一次，依此类推：index 0..2 出现 5 次，3 出现 4 次…
+    return byPhrase[0] === 5 && byPhrase[3] === 4 && byPhrase[4] === 3 && byPhrase[6] === 1;
+  })(),
+  '各 index 出现次数：' + JSON.stringify((() => {
+    const m = {};
+    for (const e of noteJudges) m[e.payload.index] = (m[e.payload.index] || 0) + 1;
+    return m;
+  })()));
+// ⚠️ 这里不断言"完美演唱必须全 perfect"：
+//    测试桩不是忠实的演唱仿真（音高有 ±1.2% 微扰、起音有 ~250ms 系统性滞后），
+//    真实人声的档位表现需真机验证。
+//    档位**阈值**的正确性由 test-score.mjs 的 `judgeNotes` 专项用例覆盖
+//    （完美→perfect、低/高八度→perfect、晚250ms→good、偏150音分→good、偏400音分→miss）。
+//    本用例只验证事件机制与档位区分度。
+const tierCounts = {};
+for (const e of noteJudges) tierCounts[e.payload.tier] = (tierCounts[e.payload.tier] || 0) + 1;
+check('档位具有区分度（不只出现单一档位）',
+  Object.keys(tierCounts).length >= 2,
+  JSON.stringify(tierCounts));
+check('至少存在 perfect 档（说明机制可达最高档）',
+  (tierCounts.perfect || 0) > 0, JSON.stringify(tierCounts));
+check('末音也被判定（每句最后一个音的 index 都出现过）',
+  (() => {
+    const m = {};
+    for (const e of noteJudges) m[e.payload.index] = (m[e.payload.index] || 0) + 1;
+    return m[2] === 5 && m[6] === 1;   // 最长句 7 音 → index 6 只出现 1 次
+  })(),
+  'index 2 与 index 6 均已出现');
 
 const finales = ofType('game:finale');
 check('game:finale 含 wreckedTotal/ending/seed（契约 C3）',
