@@ -354,7 +354,8 @@ const CONTRACT_API = ['init', 'start', 'replayPhrase', 'abort', 'on', 'off', 'ge
 const missingApi = CONTRACT_API.filter((k) => typeof Siren[k] !== 'function');
 check('契约 C1 的 8 个成员齐备', missingApi.length === 0,
   missingApi.length ? '缺 ' + missingApi.join(', ') : CONTRACT_API.concat(['version']).join(', '));
-check('version === "1.0.0"（契约 C1）', Siren.version === '1.0.0', String(Siren.version));
+check('version === "1.1.0"（契约 C1，v1.1.0 起含 TUTORIAL/skipTutorial）',
+  Siren.version === '1.1.0', String(Siren.version));
 check('window.Siren 上未暴露内部诊断接口（P4 收窄）',
   !Siren._scoreAttempt && !Siren._scoreAttemptVerbose,
   '顶层可调用成员：' + CONTRACT_API.join(', '));
@@ -408,6 +409,9 @@ Siren.on('attempt:start', () => {
 
 await Siren.init({ seed: 4821 });
 segLog.length = 0;             // 只看 test 4 这一次运行
+// 标记引导关已完成：本节测的是**正片**的 5 乐句流程。
+// 引导关本身在【4b】小节单独测（它会产生额外的录音与船队，会污染这里的计数）。
+storeMap.set('siren.tutorialDone', '1');
 Siren.start();
 await Promise.resolve();
 await Promise.resolve();
@@ -560,6 +564,78 @@ check('有乐句打出真实分数（评分链连通）',
   ofType('phrase:result').some((e) => e.payload.newWrecked > 0),
   '逐句触礁：' + ofType('phrase:result').map((e) => e.payload.newWrecked).join(', ') +
   '（绝对分数见 test-score.mjs）');
+
+// ================================================================ 4b
+
+console.log('');
+console.log('[4b] 新手引导关（v1.1.0 / 契约 C2 的 TUTORIAL phase）');
+{
+  // 清掉「已完成」标记，重新走一次首局
+  storeMap.delete('siren.tutorialDone');
+  events.length = 0;
+  micStub.state.amp = 0.4;
+  await Siren.init({ seed: 777 });
+  Siren.start();
+  await Promise.resolve();
+  await Promise.resolve();
+  await clock.advanceTo(clock.now() + 50);
+
+  check('首局进入 TUTORIAL phase（契约 C2）',
+    Siren.getState().phase === 'TUTORIAL',
+    'phase=' + Siren.getState().phase);
+
+  const tutPhrases = ofType('melody:phraseStart');
+  check('引导关播放固定 3 音乐句（PRD §7.5.1.2）',
+    tutPhrases.length >= 1 && tutPhrases[0].payload.notes.length === 3,
+    tutPhrases.length ? tutPhrases[0].payload.notes.length + ' 音' : '(无)');
+  check('引导关乐句 phraseIndex 恒为 0，且不是熟曲',
+    tutPhrases.length >= 1 && tutPhrases[0].payload.phraseIndex === 0 &&
+    tutPhrases[0].payload.familiar === false,
+    tutPhrases.length ? JSON.stringify({ i: tutPhrases[0].payload.phraseIndex, fam: tutPhrases[0].payload.familiar }) : '(无)');
+
+  // 推进到通过（micStub 会唱准）
+  let g2 = 0;
+  while (Siren.getState().phase === 'TUTORIAL') {
+    await clock.advanceTo(clock.now() + 50);
+    if (++g2 > 4000) break;
+  }
+  check('引导关唱对后自动进入 LEARN_LOOP',
+    Siren.getState().phase === 'LEARN_LOOP',
+    'phase=' + Siren.getState().phase + '（推进 ' + g2 + ' 步）');
+  check('引导关产生了船队反馈（教学因果可见）',
+    ofType('ship:in').length > 0,
+    'ship:in ' + ofType('ship:in').length + ' 次');
+  check('引导关不产生 phrase:result（不计入战果）',
+    ofType('phrase:result').length === 0,
+    'phrase:result ' + ofType('phrase:result').length + ' 次');
+  check('通过后写入 tutorialDone 标记',
+    storeMap.get('siren.tutorialDone') === '1',
+    String(storeMap.get('siren.tutorialDone')));
+  Siren.abort();
+
+  // ---- 跳过路径
+  storeMap.delete('siren.tutorialDone');
+  events.length = 0;
+  await Siren.init({ seed: 888 });
+  Siren.start();
+  await Promise.resolve();
+  await Promise.resolve();
+  await clock.advanceTo(clock.now() + 50);
+  check('第二次首局仍进 TUTORIAL（标记已清）', Siren.getState().phase === 'TUTORIAL',
+    'phase=' + Siren.getState().phase);
+  const skipped = Siren.skipTutorial();
+  check('skipTutorial() 返回 true（契约 C1 新增成员）', skipped === true, String(skipped));
+  await clock.advanceTo(clock.now() + 50);
+  check('跳过后直接进 LEARN_LOOP',
+    Siren.getState().phase === 'LEARN_LOOP',
+    'phase=' + Siren.getState().phase);
+  check('跳过后也写入标记（不再重复引导）',
+    storeMap.get('siren.tutorialDone') === '1',
+    String(storeMap.get('siren.tutorialDone')));
+  Siren.abort();
+  events.length = 0;
+  storeMap.set('siren.tutorialDone', '1');
+}
 
 // ================================================================ 5
 

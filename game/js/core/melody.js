@@ -270,4 +270,4 @@
     TITLE_REVEAL_MIN_SCORE: TITLE_REVEAL_MIN_SCORE,
     BOSS_PHRASE_INDEX: BOSS_PHRASE_INDEX
   };
-})(typeof window !== 'undefined' ? window : globalThis);
+})(typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : {}));

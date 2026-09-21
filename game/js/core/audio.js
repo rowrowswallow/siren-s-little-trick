@@ -545,4 +545,4 @@
       FORMANT_1: FORMANT_1, FORMANT_2: FORMANT_2, WET: WET, IR: IR, VIBRATO: VIBRATO
     }
   };
-})(typeof window !== 'undefined' ? window : globalThis);
+})(typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : {}));

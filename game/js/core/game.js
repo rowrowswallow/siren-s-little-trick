@@ -28,6 +28,15 @@
 
   var CFG = Fleet.CONFIG;
 
+  // ---------------------------------------------------------------- 常量
+
+  /**
+   * 引导关的示范性船队强度（PRD §7.5.1.2）。
+   * 引导关不评分，但**必须有船动**——玩家要学到的是"我的声音让船动起来"这个因果，
+   * 而不是"对着麦克风发声"。取 70 分对应的强度：船成片涌向礁石，视觉上足够明确。
+   */
+  var TUTORIAL_DEMO_SCORE = 70;
+
   // ---------------------------------------------------------------- 状态
 
   var phase = 'BOOT';
@@ -67,6 +76,9 @@
   var recordTarget = null;      // 本句目标音序列
   var recordJudged = 0;         // 已判到第几个音（不含末音）
   var recordJudgements = [];    // 已判结果（末音在 finishRecord 里补）
+  // v1.1.0 新手引导关（PRD §7.5.1.2）
+  var tutorialDone = false;     // 本局是否已走完引导
+  var tutorialAttempts = 0;     // 引导关重试次数（仅用于诊断）
   var recordHadVoice = false;
   var lastVoicedAt = 0;
   var lastPitchSent = 0;
@@ -297,15 +309,24 @@
     shipsWrecked = 0;
     scoreSum = 0;
     phraseIndex = 0;
+    tutorialAttempts = 0;
     lastEnding = null;
     lastTitleRevealed = null;
     Store.set(Store.KEYS.SEED, seed);
     fallbackTarget = null;
+    // 首次进入先走引导关（PRD §7.5.1.2）；已完成过则直接开正片
+    if (Store.get(Store.KEYS.TUTORIAL_DONE, '') !== '1') {
+      startTutorial();
+      return;
+    }
     if (!setPhase('LEARN_LOOP', null)) return;
     runPhrase();
   }
 
-  function currentPhrase() { return phrases[phraseIndex]; }
+  /** 当前正在唱的乐句：引导关用固定教学句，正片用生成的乐句 */
+  function currentPhrase() {
+    return phase === 'TUTORIAL' ? tutorialPhrase() : phrases[phraseIndex];
+  }
 
   function phraseNotes() {
     return Melody.toNotes(currentPhrase(), CFG.BPM);
@@ -515,7 +536,7 @@
   }
 
   function finishRecord(reason, isSilence) {
-    if (phase !== 'LEARN_LOOP' || subPhase !== 'RECORD') return;
+    if (subPhase !== 'RECORD') return;
     if (pitchTimer === null && recordEndReason !== null) return;
     if (pitchTimer) { global.clearInterval(pitchTimer); pitchTimer = null; }
     if (recordEndReason !== null) return;
@@ -571,9 +592,129 @@
       if (!notice('NO_INPUT')) return;   // 契约 C4：建议前端不显示文字，改让海妖沉回水中
     }
 
+    // ---- 新手引导关：不计分、不产生战果、可无限重试（PRD §7.5.1.2）
+    if (phase === 'TUTORIAL') {
+      finishTutorialAttempt(score);
+      return;
+    }
+
     scoreSum += score;
     later(function () { pullWave(score); }, 120);
   }
+
+  /**
+   * 引导关一次尝试的收尾。
+   *
+   * 通过条件：**唱出至少 1 个音**（门槛极低，目的是教学不是筛选）。
+   * 通过后先放一段示范性的船队动画（让玩家看到"声音→船动"的因果），再进正片。
+   * 没通过则回到 LISTEN，重新来一次。
+   */
+  function finishTutorialAttempt(score) {
+    var heard = 0;
+    for (var i = 0; i < recordJudgements.length; i += 1) {
+      if (recordJudgements[i].tier !== 'miss') heard += 1;
+    }
+
+    if (heard < 1) {
+      // 没唱出来：不提示文字，直接重来（P4：不评价玩家）
+      later(function () {
+        if (phase !== 'TUTORIAL') return;
+        runTutorialPhrase();
+      }, 600);
+      return;
+    }
+
+    // 通过：给一段固定的船队反馈（不消耗正片船队，故单独生成一批）
+    if (!setSub('PULL')) return;
+    var ships = Fleet.spawnWave(rng, 0);
+    var res = Fleet.resolveWave(ships, TUTORIAL_DEMO_SCORE);
+    for (var k = 0; k < ships.length; k += 1) {
+      (function (ship) {
+        later(function () {
+          emit('ship:in', {
+            id: ship.id, lane: ship.lane, depth: ship.depth,
+            side: ship.side, entryDelayMs: ship.entryDelayMs
+          });
+        }, ship.entryDelayMs);
+      })(ships[k]);
+    }
+    for (var w = 0; w < res.wrecked.length; w += 1) {
+      (function (ship, idx) {
+        later(function () {
+          emit('ship:wrecked', { id: ship.id, pull: ship.pull });
+        }, 620 + idx * 45);
+      })(res.wrecked[w], w);
+    }
+
+    later(function () {
+      if (phase !== 'TUTORIAL') return;
+      finishTutorial('passed');
+    }, 620 + res.wrecked.length * 45 + 900);
+  }
+
+  // ---------------------------------------------------------------- 新手引导关（v1.1.0）
+
+  /**
+   * 新手引导关（PRD §7.5.1.2 / 契约 C2 的 `TUTORIAL` phase）。
+   *
+   * 目的：让玩家在没有任何压力的情况下走一遍「听 → 备 → 唱」，
+   *       并**看见"自己的声音让船动起来"这个因果**——这是本作唯一的规则，必须亲眼见到。
+   *
+   * ⚠️ 教学 ≠ 评分：不产生战果、不计入 scoreSum、不参与结局判定。
+   *    但**保留船的动画反馈**（评分按固定值传入，保证一定有船动），
+   *    否则玩家只学到"对着麦克风发声"，学不到规则。
+   */
+  function startTutorial() {
+    tutorialDone = false;
+    if (!setPhase('TUTORIAL', null)) return;
+    runTutorialPhrase();
+  }
+
+  /** 引导关的单句：3 音级进，固定种子，不参与随机 */
+  function tutorialPhrase() {
+    return {
+      degrees: [0, 1, 0],
+      eighths: [2, 2, 4],
+      scale: 'pentatonic',
+      familiar: false,
+      title: null,
+      phraseIndex: 0
+    };
+  }
+
+  function runTutorialPhrase() {
+    replayUsed = false;
+    tutorialAttempts += 1;
+    if (!setSub('LISTEN')) return;
+    var p = tutorialPhrase();
+    var notes = Melody.toNotes(p, CFG.BPM);
+    playListen(notes, p.eighths.slice(), false);
+  }
+
+  /** 引导关通过（或跳过）后进入正片 */
+  function finishTutorial(reason) {
+    tutorialDone = true;
+    Store.set(Store.KEYS.TUTORIAL_DONE, '1');
+    // 清掉引导关产生的临时战果，确保正片从 0 开始
+    shipsAll = [];
+    shipsByWave = [];
+    shipsSpawned = 0;
+    shipsWrecked = 0;
+    scoreSum = 0;
+    if (!setPhase('LEARN_LOOP', null)) return;
+    runPhrase();
+  }
+
+  /** 外部（前端按钮）跳过引导关 */
+  function skipTutorial() {
+    if (phase !== 'TUTORIAL') return false;
+    clearTimers();
+    Audio.stopPlayback();
+    finishTutorial('skipped');
+    return true;
+  }
+
+  // ---------------------------------------------------------------- 船队波次
 
   /** D9：生成 20 条新船 → 逐船判定 → 广播入场与触礁 */
   function pullWave(score) {
@@ -869,6 +1010,7 @@
     init: init,
     start: start,
     replayPhrase: replayPhrase,
+    skipTutorial: skipTutorial,
     abort: abort,
     on: on,
     off: off_,

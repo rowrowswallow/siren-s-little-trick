@@ -224,4 +224,4 @@
     mulberry32: mulberry32,
     config: config
   };
-})(typeof window !== 'undefined' ? window : globalThis);
+})(typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : {}));

@@ -21,7 +21,8 @@
     PLAYS: PREFIX + 'plays',                   // 累计局数
     SEED: PREFIX + 'seed',                     // 上次使用的种子，便于复现
     MIC_OK: PREFIX + 'mic.ok',                 // 上次麦克风是否可用（'1' / '0'）
-    MUTED: PREFIX + 'muted'                    // 音效是否静音
+    MUTED: PREFIX + 'muted',                   // 音效是否静音
+    TUTORIAL_DONE: PREFIX + 'tutorialDone'     // 是否已走过新手引导关（v1.1.0）
   };
 
   /** 探测 localStorage 是否真的可用（Safari 隐私模式下 getItem 就会抛） */
@@ -123,4 +124,4 @@
     stats: stats,
     commitRun: commitRun
   };
-})(typeof window !== 'undefined' ? window : globalThis);
+})(typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : {}));

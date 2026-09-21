@@ -193,4 +193,4 @@
     findOnset: findOnset,
     config: config
   };
-})(typeof window !== 'undefined' ? window : globalThis);
+})(typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : {}));
