@@ -424,11 +424,28 @@
       }
     });
   }
+  // Re-entrancy guard. Resizing writes canvas dimensions and the share card's measured width,
+  // which can make the observer fire again inside its own callback; WebKit reports that as an
+  // uncaught "ResizeObserver loop completed with undelivered notifications". Coalescing into one
+  // frame and bailing when nothing actually changed removes the loop instead of silencing it.
+  var resizePending = false;
+  function scheduleResize() {
+    if (resizePending) return;
+    resizePending = true;
+    window.requestAnimationFrame(function () {
+      resizePending = false;
+      resize();
+    });
+  }
   function resize() {
     var rect = el.stage.getBoundingClientRect();
-    size.width = Math.max(1, rect.width);
-    size.height = Math.max(1, rect.height);
-    size.ratio = Math.min(window.devicePixelRatio || 1, 2);
+    var width = Math.max(1, rect.width);
+    var height = Math.max(1, rect.height);
+    var ratio = Math.min(window.devicePixelRatio || 1, 2);
+    if (width === size.width && height === size.height && ratio === size.ratio) return;
+    size.width = width;
+    size.height = height;
+    size.ratio = ratio;
     canvas.width = Math.round(size.width * size.ratio);
     canvas.height = Math.round(size.height * size.ratio);
     if (ctx) ctx.setTransform(size.ratio, 0, 0, size.ratio, 0, 0);
@@ -580,8 +597,8 @@
   api.on('notice', onTechnical);
   api.on('error', onTechnical);
 
-  window.addEventListener('resize', resize, { passive: true });
-  if (window.ResizeObserver) new ResizeObserver(resize).observe(el.stage);
+  window.addEventListener('resize', scheduleResize, { passive: true });
+  if (window.ResizeObserver) new ResizeObserver(scheduleResize).observe(el.stage);
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
       window.cancelAnimationFrame(frameId);
@@ -589,7 +606,7 @@
       if (isPlaying() || state.phase === 'PERM_REQUEST' || state.phase === 'FINALE') api.abort();
       clearNotice();
     } else {
-      resize();
+      scheduleResize();
       requestFrame();
     }
   });
