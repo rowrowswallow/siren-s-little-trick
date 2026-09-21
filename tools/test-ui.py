@@ -8,12 +8,17 @@ Uses two independent, fresh browser contexts. The denied route exercises the
 actual browser rejection and five rhythm phrases. The synthetic microphone
 route supplies an actual Web Audio MediaStream, follows the published melody
 events, and leaves one phrase silent. No internal game functions are invoked.
-This checks desktop Chromium; a real phone and human microphone remain needed.
+Runs on Chromium and WebKit. WebKit is not optional decoration: every visual defect found on
+a real iPad so far was a CSS feature falling back differently there (mask-mode ignored so an
+opaque luminance mask masked nothing; container queries absent so cqw resolved against the
+viewport). Chromium alone cannot see any of that. A real phone and human microphone are still
+needed on top.
 """
 
 import argparse
 import asyncio
 import json
+import os
 import re
 import time
 from pathlib import Path
@@ -162,11 +167,12 @@ async def viewport_snapshots(page, report, output, name, screenshots):
         await page.set_viewport_size(previous)
 
 
-async def scenario(browser, args, mode):
+async def scenario(browser, args, mode, engine):
     output = args.output
-    report = {"mode": mode, "failures": [], "errors": [], "consoleWarnings": [],
+    report = {"mode": engine + "-" + mode, "engine": engine, "failures": [], "errors": [], "consoleWarnings": [],
               "requestsFailed": [], "httpErrors": [], "externalRequests": [], "layouts": [], "events": []}
     synthetic = mode == "microphone"
+    mode = engine + "-" + mode  # keep screenshots and snapshot names per engine
     context = await browser.new_context(viewport={"width": 1440 if synthetic else 844,
                                                   "height": 900 if synthetic else 390},
                                         has_touch=not synthetic, reduced_motion="reduce")
@@ -186,6 +192,23 @@ async def scenario(browser, args, mode):
     try:
         await page.goto(args.url, wait_until="networkidle")
         await page.wait_for_function("window.Siren && Siren.getState().phase === 'HOME'", timeout=10000)
+        # The synthetic singer needs Web Audio and a patchable navigator.mediaDevices. Headless
+        # WebKit ships neither, so the override never installs, the game is told the microphone
+        # was denied and drops into the tap route. That is correct product behaviour, not a
+        # regression, so record the gap instead of failing five unrelated assertions. WebKit is
+        # still worth running: every visual defect found on a real iPad so far was CSS, and the
+        # fallback route exercises the whole layout.
+        audio = await page.evaluate("""() => ({
+          mediaDevices: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia),
+          audioContext: !!(window.AudioContext || window.webkitAudioContext)
+        })""")
+        report["audioSupport"] = audio
+        if synthetic and not (audio["mediaDevices"] and audio["audioContext"]):
+            report["skipped"] = ("engine exposes no " +
+                                 ("navigator.mediaDevices" if not audio["mediaDevices"] else "AudioContext") +
+                                 "; a synthetic singer cannot be installed here")
+            await context.close()
+            return report
         await page.evaluate(OBSERVE_SCRIPT, {"events": EVENTS, "synthetic": synthetic})
         await viewport_snapshots(page, report, output, mode + "-home", args.screenshots)
         await click_action(page, "start")
@@ -322,19 +345,38 @@ async def main():
     parser.add_argument("--timeout", type=int, default=180)
     parser.add_argument("--screenshots", action="store_true")
     parser.add_argument("--mode", choices=["all", "fallback", "microphone"], default="all")
+    parser.add_argument("--engine", choices=["all", "chromium", "webkit"], default="all")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+
+    # WebKit honours the environment's proxy for localhost, where Chromium bypasses it. A proxied
+    # 127.0.0.1 answers 502 and the run dies with no page at all, so drop the proxy when the
+    # target is local.
+    if urlparse(args.url).hostname in ("localhost", "127.0.0.1", "::1"):
+        for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "ALL_PROXY", "all_proxy"):
+            os.environ.pop(name, None)
+        os.environ["NO_PROXY"] = "*"
+
+    modes = ["fallback", "microphone"] if args.mode == "all" else [args.mode]
+    engines = ["chromium", "webkit"] if args.engine == "all" else [args.engine]
+    reports = []
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True, args=[
-            "--disable-background-timer-throttling",
-            "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows"])
-        modes = ["fallback", "microphone"] if args.mode == "all" else [args.mode]
-        reports = await asyncio.gather(*(scenario(browser, args, mode) for mode in modes))
-        await browser.close()
-    lines = ["# Frontend browser acceptance report", "", "Real Chromium state-machine runs; no internal state mutation.", "",
+        for engine in engines:
+            if engine == "chromium":
+                browser = await playwright.chromium.launch(headless=True, args=[
+                    "--disable-background-timer-throttling",
+                    "--disable-renderer-backgrounding", "--disable-backgrounding-occluded-windows"])
+            else:
+                browser = await playwright.webkit.launch(headless=True)
+            reports += await asyncio.gather(*(scenario(browser, args, mode, engine) for mode in modes))
+            await browser.close()
+    lines = ["# Frontend browser acceptance report", "", "Real Chromium and WebKit state-machine runs; no internal state mutation.", "",
              "Microphone route uses a synthetic Web Audio stream. Physical device, permissions, and human singing require manual verification.", ""]
     failures = 0
     for report in reports:
+        if report.get("skipped"):
+            lines += ["## " + report["mode"], "", "Result: SKIPPED", "", "- " + report["skipped"], ""]
+            continue
         failures += len(report["failures"])
         lines += ["## " + report["mode"], "", "Result: " + ("PASS" if not report["failures"] else "FAIL"), ""]
         lines += ["- " + failure for failure in report["failures"]]

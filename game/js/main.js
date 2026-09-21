@@ -424,16 +424,33 @@
       }
     });
   }
+  // Re-entrancy guard. Resizing writes canvas dimensions and the share card's measured width,
+  // which can make the observer fire again inside its own callback; WebKit reports that as an
+  // uncaught "ResizeObserver loop completed with undelivered notifications". Coalescing into one
+  // frame and bailing when nothing actually changed removes the loop instead of silencing it.
+  var resizePending = false;
+  function scheduleResize() {
+    if (resizePending) return;
+    resizePending = true;
+    window.requestAnimationFrame(function () {
+      resizePending = false;
+      resize();
+    });
+  }
   function resize() {
     var rect = el.stage.getBoundingClientRect();
-    size.width = Math.max(1, rect.width);
-    size.height = Math.max(1, rect.height);
-    size.ratio = Math.min(window.devicePixelRatio || 1, 2);
+    var width = Math.max(1, rect.width);
+    var height = Math.max(1, rect.height);
+    var ratio = Math.min(window.devicePixelRatio || 1, 2);
+    if (width === size.width && height === size.height && ratio === size.ratio) return;
+    size.width = width;
+    size.height = height;
+    size.ratio = ratio;
     canvas.width = Math.round(size.width * size.ratio);
     canvas.height = Math.round(size.height * size.ratio);
     if (ctx) ctx.setTransform(size.ratio, 0, 0, size.ratio, 0, 0);
     drawFleet(now());
-    if (ui.sharing) drawShareFleet();
+    if (ui.sharing) { sizeShareCard(); drawShareFleet(); }
   }
   function requestFrame() {
     if (frameId === null && !document.hidden) frameId = window.requestAnimationFrame(frame);
@@ -449,7 +466,18 @@
     if (!ui.sharing && (isPlaying() || state.phase === 'FINALE' || (ships.size && !reduced.matches))) requestFrame();
   }
 
+  // The card used to size its type in cqw. Where container queries do not apply, cqw falls back
+  // to the viewport and the boat count rendered at 27% of the screen width (seen on iPad).
+  // Measuring the card and publishing the width works on every engine, and self-corrects if the
+  // card's own width rule ever falls back too.
+  function sizeShareCard() {
+    var card = el['share-card'];
+    if (!card) return;
+    var width = card.getBoundingClientRect().width;
+    if (width > 0) card.style.setProperty('--card-w', width + 'px');
+  }
   function drawShareFleet() {
+    sizeShareCard();
     var shareCanvas = el['share-fleet'];
     var rect = shareCanvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return;
@@ -569,8 +597,8 @@
   api.on('notice', onTechnical);
   api.on('error', onTechnical);
 
-  window.addEventListener('resize', resize, { passive: true });
-  if (window.ResizeObserver) new ResizeObserver(resize).observe(el.stage);
+  window.addEventListener('resize', scheduleResize, { passive: true });
+  if (window.ResizeObserver) new ResizeObserver(scheduleResize).observe(el.stage);
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) {
       window.cancelAnimationFrame(frameId);
@@ -578,7 +606,7 @@
       if (isPlaying() || state.phase === 'PERM_REQUEST' || state.phase === 'FINALE') api.abort();
       clearNotice();
     } else {
-      resize();
+      scheduleResize();
       requestFrame();
     }
   });
@@ -597,8 +625,11 @@
       image.src = path;
     });
   }
-  function compileSprites(atlas, mask) {
-    if (!atlas || !mask) return;
+  // The atlas carries real alpha (baked by art-source/bake-alpha.py), so this only cuts the
+  // three columns and trims each to its drawn pixels. It used to composite a separate luminance
+  // mask over 1.57M pixels on the main thread at every startup.
+  function compileSprites(atlas) {
+    if (!atlas) return;
     for (var index = 0; index < 3; index += 1) {
       var width = Math.ceil(atlas.naturalWidth / 3);
       var height = atlas.naturalHeight;
@@ -606,22 +637,17 @@
       sprite.width = width; sprite.height = height;
       var context = sprite.getContext('2d', { willReadFrequently: true });
       context.drawImage(atlas, index * atlas.naturalWidth / 3, 0, atlas.naturalWidth / 3, height, 0, 0, width, height);
-      var pixels = context.getImageData(0, 0, width, height);
-      context.clearRect(0, 0, width, height);
-      context.drawImage(mask, index * mask.naturalWidth / 3, 0, mask.naturalWidth / 3, mask.naturalHeight, 0, 0, width, height);
       var coverage = context.getImageData(0, 0, width, height).data;
       var left = width, top = height, right = 0, bottom = 0;
-      for (var offset = 0; offset < coverage.length; offset += 4) {
-        // The separately generated luminance mask is the alpha source, including all drawn edges.
-        var alpha = Math.round(coverage[offset] * 0.2126 + coverage[offset + 1] * 0.7152 + coverage[offset + 2] * 0.0722);
-        pixels.data[offset + 3] = Math.round(pixels.data[offset + 3] * alpha / 255);
-        if (alpha > 24) {
-          var x = (offset / 4) % width, y = Math.floor(offset / 4 / width);
-          left = Math.min(left, x); right = Math.max(right, x);
-          top = Math.min(top, y); bottom = Math.max(bottom, y);
-        }
+      for (var offset = 3; offset < coverage.length; offset += 4) {
+        if (coverage[offset] <= 24) continue;
+        var pixel = (offset - 3) / 4;
+        var x = pixel % width, y = Math.floor(pixel / width);
+        if (x < left) left = x;
+        if (x > right) right = x;
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
       }
-      context.putImageData(pixels, 0, 0);
       if (right <= left || bottom <= top) continue;
       left = Math.max(0, left - 4); top = Math.max(0, top - 4);
       right = Math.min(width, right + 5); bottom = Math.min(height, bottom + 5);
@@ -638,12 +664,10 @@
   api.init().then(function () { renderState(); });
   Promise.all([
     loadImage('./assets/boats/boats-atlas.webp'),
-    loadImage('./assets/boats/boats-mask.webp'),
     loadImage('./assets/scenery/sea.webp'),
-    loadImage('./assets/characters/siren-atlas.webp'),
-    loadImage('./assets/characters/siren-mask.webp')
+    loadImage('./assets/characters/siren-atlas.webp')
   ]).then(function (images) {
-    try { compileSprites(images[0], images[1]); } catch (_) { sprites = []; }
+    try { compileSprites(images[0]); } catch (_) { sprites = []; }
     drawFleet(now());
     if (ui.sharing) drawShareFleet();
   });
