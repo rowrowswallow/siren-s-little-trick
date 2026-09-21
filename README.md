@@ -4,7 +4,7 @@
 
 现已包含前端与后端：采用用户确认的明亮手绘海面、蓝发海妖和可爱船只，覆盖首页、主游戏、单句结算、终局与竖版分享卡。视觉参考优先于早期 PRD 中的像素风描述；只显示船数，不向玩家展示评分或诊断。
 
-运行 `npm run serve` 后打开终端显示的本地地址；`npm run build` 生成离线 ZIP。素材清单见 [docs/素材清单.md](docs/素材清单.md)，前端接入与动效说明见 [docs/前端交付说明.md](docs/前端交付说明.md)。
+运行 `npm run serve` 后打开终端显示的本地地址；`npm run build` 生成离线 ZIP，`npm run build:review` 生成**不含摄像头**的过审版 ZIP。素材清单见 [docs/素材清单.md](docs/素材清单.md)，前端接入与动效说明见 [docs/前端交付说明.md](docs/前端交付说明.md)，**v1.1.0 前端要动的地方见 [docs/v1.1.0-前端待办.md](docs/v1.1.0-前端待办.md)**。
 
 ```
 game/
@@ -16,36 +16,63 @@ game/
   js/
     main.js               前端控制器：公开事件、船队 Canvas、音块和分享卡
     core/                 ★ 后端
-      store.js            localStorage 封装（前缀 siren.）
+      store.js            持久层：内存缓存 + 异步写穿（miniTool → localStorage → 内存）
       pitch.js            YIN 音高检测 + 种子 PRNG(mulberry32)
       segment.js          音符切分 + 起音检测（含哼唱 60% 阈值）
-      score.js            四维打分（DTW 对齐 + 移调补偿），只返回 { score }
+      score.js            四维打分（DTW 对齐 + 移调补偿）+ 逐音档位，对外只返回 { score }
       audio.js            三层加法合成音色 + 调度（siren / cue / tick）
-      melody.js           旋律生成（五声音阶，种子可复现）
+      melody.js           旋律生成（熟曲用大调音阶，原创句用五声音阶，种子可复现）
       fleet.js            船队模拟（100 条船，分数 → 触礁数）
-      game.js             状态机 + 事件编排 + 麦克风采集
-      index.js            ★ 唯一对外入口，挂 window.Siren
+      game.js             状态机（含 TUTORIAL 引导关）+ 事件编排 + 麦克风采集 + 录音回放
+      index.js            ★ 唯一对外入口，挂 window.Siren（9 个成员）
     probe/                开发工具：M0 探针页（不进上传包）
+    lab/                  开发工具：D14 试唱台（不进上传包）
 tools/
-  pack.mjs                合规校验 + 打包（零依赖，自写 ZIP 写入器）
-  selfcheck.mjs           静态自检（D2 顺序 / D0 边界 / D13 清单）
+  pack.mjs                合规校验 + 打包（零依赖，自写 ZIP 写入器；支持 --no-camera 过审版）
+  selfcheck.mjs           静态自检（D2 顺序 / D0 边界 / 文案红线 / Chrome 61 语法基线）
   test-pitch.mjs          YIN 精度与性能（合成信号，无需麦克风）
-  test-score.mjs          四维打分与旋律生成约束
+  test-score.mjs          四维打分、逐音档位与旋律生成约束
   test-fleet.mjs          船队数值（1000 局 × 11 个分数段）
-  test-integration.mjs    契约 C1–C4 集成验证（虚拟时钟驱动整局）
+  test-hum.mjs            端到端音频链路（哼唱/真唱同分、连续同音切分）
+  test-integration.mjs    契约 C1–C5 集成验证（虚拟时钟驱动整局）
+  test-lifecycle.mjs      生命周期回归（8 个独立场景）
+  mem-report.mjs          内存与磁盘占用报告
 dist/
-  haixiao-minitool.zip    上传到小红书后台的产物
+  haixiao-minitool.zip         上传到小红书后台的产物
+  haixiao-minitool-review.zip  过审版（切除全部摄像头代码）
 ```
 
 ## 常用命令
 
 ```bash
-npm run verify     # 全部检查：静态自检 + 6 组测试 + 合规校验
-npm test           # 只跑测试
-npm run build      # 打包 → dist/haixiao-minitool.zip（自动排除 probe/ 与 lab/）
-npm run curve      # 查看触礁率曲线与结局分布
-npm run serve      # 本地预览（含探针页与试唱台）
+npm run verify        # 全部检查：静态自检 + 6 组测试 + 合规校验
+npm test              # 只跑测试
+npm run build         # 打包 → dist/haixiao-minitool.zip（自动排除 probe/ 与 lab/）
+npm run build:review  # 过审版 → dist/haixiao-minitool-review.zip（切除全部摄像头代码）
+npm run curve         # 查看触礁率曲线与结局分布
+npm run serve         # 本地预览（含探针页与试唱台）
 ```
+
+### 两版产物
+
+| 版本 | 命令 | 用途 | 提审权限勾选 |
+| --- | --- | --- | --- |
+| 完整版 | `npm run build` | 后续含摄像头时用 | 麦克风 + 本地存储（v1.2 起再加摄像头） |
+| **过审版** | `npm run build:review` | **v1.1.0 提审用** | **只勾麦克风 + 本地存储** |
+
+过审版按**成对标记**切除摄像头代码，摄像头相关代码必须完整包在标记之间：
+
+```js
+// CAMERA:BEGIN
+/* …getUserMedia({video:…}) / MediaRecorder / captureStream… */
+// CAMERA:END
+```
+
+打包时会做两道闸门校验，任一不过**直接终止打包**：
+标记外的游离摄像头调用（残留扫描）、`CAMERA:BEGIN` 与 `CAMERA:END` 不配对。
+
+v1.1.0 的代码里还没有摄像头，所以当前两版产物字节完全相同。
+详见 [docs/v1.1.0-前端待办.md](docs/v1.1.0-前端待办.md) §6。
 
 ## 开发工具（不进上传包）
 
@@ -55,7 +82,7 @@ npm run serve      # 本地预览（含探针页与试唱台）
 | **D14 试唱台** | `/js/lab/lab.html` | **步骤 2**：试听海妖的合成音色（判断能否听出旋律）<br>**步骤 3**：唱一句看分数是否符合直觉，并核对机器听出的音与目标音 |
 
 两者都必须走 http（`file://` 下浏览器会拒绝 `getUserMedia`），所以先 `npm run serve`。
-打包时由 `tools/pack.mjs` 自动排除（`--exclude` 可覆盖）。
+打包时由 `tools/pack.mjs` 自动排除 `probe/` 与 `lab/`（`--exclude` 可覆盖）。
 
 试唱台用的是与正式游戏**完全相同的模块**（pitch/segment/score/audio/melody），
 不是另一套实现——否则验证没有意义。它显示的"四维拆解"仅供开发期调参，
@@ -65,17 +92,17 @@ npm run serve      # 本地预览（含探针页与试唱台）
 
 前端已接通 `window.Siren` 的公开接口与事件。后端不操作页面，前端不重新计算分数。浏览器验收脚本 `tools/test-ui.py` 使用真实状态机完成拒权点拍与模拟麦克风两条路线；模拟音频不替代手机实测与真人试唱。尚未上传平台或部署。
 
-**176 项离线检查全绿**：
+**217 项离线检查 + 8 个生命周期场景全绿**：
 
 | 测试 | 项数 | 覆盖 |
 | --- | --- | --- |
 | `test-pitch.mjs` | 34 | 音高精度（最大 0.13 音分）、单帧 0.96ms、超范围零泄漏 |
-| `test-score.mjs` | 44 | 完美演唱 100 分、低八度不扣分、跑调扣分、零随机、D8 生成约束 |
+| `test-score.mjs` | 56 | 完美演唱 100 分、低八度不扣分、跑调扣分、零随机、D8 生成约束、四档判定 |
 | `test-fleet.mjs` | 23 | D13 三条用例（含满分确定性 100）、线性曲线、k 分布、种子可复现 |
 | `test-hum.mjs` | 15 | 端到端音频链路：哼唱/真唱同分、连续同音切分、分数梯度 |
-| `test-integration.mjs` | 52 | 契约 C1–C4 全部载荷、静默中止、兜底模式、增益自适应、音频常量 |
-| `test-lifecycle.mjs` | 8 | 首次拒权整局、重听调度、短句结束、终局回放、权限竞态、资源清理 |
-| `selfcheck.mjs` | — | 加载顺序、D0 边界、诊断话术零命中 |
+| `test-integration.mjs` | 89 | 契约 C1–C5 全部载荷、静默中止、兜底模式、增益自适应、音频常量、引导关、**准备时间 1.5s**、持久层降级 |
+| `test-lifecycle.mjs` | 8 场景 | 首次拒权整局、重听调度、短句结束、终局回放、权限竞态、资源清理 |
+| `selfcheck.mjs` | — | 加载顺序、D0 边界、诊断话术零命中、Chrome 61 语法基线 |
 
 ## 文档
 
@@ -83,9 +110,11 @@ npm run serve      # 本地预览（含探针页与试唱台）
 | --- | --- |
 | `docs/01-PRD.md` | 产品意图（§7 船队模型已于 2026-09 按线性模型重做） |
 | `docs/02-后端开发规格书.md` | 后端实现依据 |
-| `docs/03-接口契约.md` | **前后端交界**，权威定义 |
-| `docs/前端接入速查卡.md` | **给前端**：8 个成员 + 14 个事件 + 状态码 + 三个易踩的坑 |
-| `docs/规格问题清单.md` | 13 条已修缺陷（各带实测）+ 5 条已决策项 |
+| `docs/03-接口契约.md` | **前后端交界**，权威定义（v1.1：含 C5 新事件与 C7 端能力） |
+| `docs/v1.1.0-前端待办.md` | **给前端**：v1.1.0 要动的 5 处 + 两版产物 + 待办风险 |
+| `docs/前端接入速查卡.md` | **给前端**：9 个成员 + 16 组事件 + 状态码 + 易踩的坑 |
+| `docs/规格问题清单.md` | 14 条已修缺陷（各带实测）+ 5 条已决策项 |
+| `docs/发布校验记录.md` | 官方 1.6.0 审计留档 + 已知未回退项（CSS Chrome 61） |
 | `docs/素材清单.md` | 素材文件、尺寸、完成状态、运行时绘制范围与授权 |
 | `docs/前端交付说明.md` | 画面、交互、动效、接入方式与验证边界 |
 | `docs/联调修复说明.md` | 接入过程中修复的后端时序与生命周期问题 |
@@ -164,6 +193,7 @@ D9.3「长期期望严格等于分数」精确成立。两个端点由**构造**
 - 单页：一个 `index.html`，视图用 JS 切换；禁 iframe
 - `index.html` 必须在 zip 根目录；总包 < 2MB（2026-09 决策，见 `docs/规格问题清单.md` B5）
 - 后端不返回任何中文话术，只给技术状态码（契约 C4）
+- 摄像头代码必须包在 `// CAMERA:BEGIN` / `// CAMERA:END` 之间，否则过审版打不出来（见「两版产物」）
 
 ## 已发现并上报的规格问题
 

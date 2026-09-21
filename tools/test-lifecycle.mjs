@@ -55,7 +55,7 @@ function makeClock() {
 
 function makeHarness({ mode = 'grant', audio = true, voiced = false } = {}) {
   const clock = makeClock(), streams = [], requests = [], oscillators = [], events = [], ticks = [], plays = [];
-  const handlers = new Set(), storage = new Map();
+  const handlers = new Set(), storage = new Map(), bufferSources = [];
   let latestPhrase = null, attemptAt = null;
   const param = (value = 0) => ({ value, setValueAtTime() {}, linearRampToValueAtTime() {}, exponentialRampToValueAtTime() {}, cancelScheduledValues() {} });
   const node = extra => Object.assign({ connect() {}, disconnect() { this.disconnected = true; } }, extra);
@@ -85,6 +85,14 @@ function makeHarness({ mode = 'grant', audio = true, voiced = false } = {}) {
       return { getChannelData: channel => data[channel] };
     }
     createMediaStreamSource() { return node(); }
+    // v1.1.0 终局回放玩家录音会用到；此前 harness 缺这个桩，
+    // 一旦真走到回放分支就会抛 TypeError。
+    createBufferSource() {
+      const src = node({ buffer: null, loop: false, starts: [], stops: [],
+        start(at) { this.starts.push(at); }, stop(at) { this.stops.push(at); } });
+      bufferSources.push(src);
+      return src;
+    }
     createAnalyser() { return node({ getFloatTimeDomainData: arr => arr.fill(currentNote() ? 0.2 : 0.001) }); }
   }
   const newStream = () => {
@@ -128,26 +136,51 @@ function makeHarness({ mode = 'grant', audio = true, voiced = false } = {}) {
   const tick = S.Audio.tick;
   S.Audio.tick = (when, accent) => { ticks.push({ when, accent, phraseIndex: S.getState().phraseIndex }); tick(when, accent); };
   return { S, win, clock, events, requests, streams, newStream, oscillators, handlers, ticks, plays,
+    bufferSources,
     of: type => events.filter(e => e.type === type),
     tap: () => { for (const fn of handlers) fn({ type: 'pointerdown' }); }
   };
 }
 
-async function start(h) { await h.S.init({ seed: 4821 }); h.S.start(); await h.clock.flush(); }
+/**
+ * v1.1.0 起首局会先走新手引导关（phase = TUTORIAL）。
+ * 本文件的用例测的是**正片**生命周期，所以先把引导标记写进去。
+ * ⚠️ Store 有内存缓存，必须走 Store 自己的 API（直接改 storage Map 看不到）。
+ */
+async function start(h) {
+  await h.S.Store.init();
+  h.S.Store.set(h.S.Store.KEYS.TUTORIAL_DONE, '1');
+  await h.S.init({ seed: 4821 });
+  h.S.start();
+  await h.clock.flush();
+}
+
+/**
+ * v1.1.0 终局：不再回放海妖全曲（`melody:replay` 已取消），
+ * 改为回放玩家自己的录音（契约 C5 的 `player:replay`）。
+ * 本 harness 走的是静音路径，去留白后没有有效演唱段 → 回放必须优雅降级，
+ * 既不能卡在 FINALE，也不能抛异常。
+ */
 function verifyFinale(h) {
-  const replay = h.of('melody:replay')[0];
+  const replay = h.of('player:replay')[0];
   const result = h.of('state:change').find(e => e.payload.phase === 'RESULT');
-  const notes = replay.payload.notes;
-  assert.equal(notes.length, 25, 'all five phrases replayed');
-  let end = 0;
-  for (const n of notes) {
-    assert.ok(Math.abs(n.startMs - end) < 0.001, 'notes concatenate with no phrase-index gaps or overlap');
-    end = n.startMs + n.durationMs;
+  const finale = h.of('game:finale')[0];
+  assert.equal(h.of('melody:replay').length, 0, '终局不再回放海妖旋律');
+  assert.ok(finale, 'game:finale 已广播');
+  assert.ok(result, '到达 RESULT');
+  if (replay) {
+    assert.ok(replay.payload.durationMs > 0, '回放时长 > 0');
+    assert.ok(Array.isArray(replay.payload.parts), 'parts[] 存在');
+    // 回放起点晚于 game:finale，且 RESULT 等回放结束
+    assert.ok(replay.at >= finale.at, '回放发生在 game:finale 之后');
+    assert.ok(result.at >= replay.at + replay.payload.durationMs,
+      'RESULT 等到回放结束才出现');
+    assert.ok(h.bufferSources.length > 0, '确实驱动了 AudioBufferSourceNode');
+  } else {
+    // 静音路径：没有录音可放，必须立刻进 RESULT，不能挂住
+    assert.ok(result.at - finale.at < 1000,
+      '无录音时终局立刻收尾（耗时 ' + (result.at - finale.at) + 'ms）');
   }
-  assert.ok(Math.abs(end - 3000) < 0.001, 'finale notes fit 3 seconds');
-  const play = h.plays.at(-1);
-  assert.ok(result.at >= play.at + play.duration * 1000, 'RESULT waits for scheduled audio');
-  assert.ok(result.at - replay.at < 3300, 'finale meets approximate 3-second product target');
   assert.equal(h.S.Audio.stats().activeVoices, 0, 'all audio released on RESULT');
 }
 
@@ -166,7 +199,7 @@ await test('cold-start denied microphone: five audible/playable rhythm phrases, 
   assert.equal(phrases.length, 5);
   assert.deepEqual(phrases.map(e => e.payload.notes.length), [3, 4, 5, 6, 7]);
   assert.ok(phrases.every(e => e.payload.notes[0].startMs === 0 && !e.payload.familiar));
-  assert.equal(h.plays.length, 6, 'five demonstrations plus finale');
+  assert.equal(h.plays.length, 5, 'five demonstrations（v1.1.0 终局不再唱海妖全曲）');
   assert.equal(h.of('attempt:start').length, 5);
   assert.equal(h.of('attempt:end').length, 5);
   assert.ok(h.of('attempt:end').every(e => e.payload.reason === 'done'));
@@ -178,7 +211,8 @@ await test('cold-start denied microphone: five audible/playable rhythm phrases, 
   assert.equal(h.of('ship:wrecked').length, 100);
   assert.equal(h.S.getState().shipsWrecked, 100);
   assert.equal(h.handlers.size, 0);
-  assert.ok(h.of('melody:replay')[0].payload.notes.every(n => n.midi === 60), 'fallback finale uses its own C4 notes');
+  assert.equal(h.of('melody:replay').length, 0, '兜底终局不回放海妖旋律（v1.1.0）');
+  assert.equal(h.of('player:replay').length, 0, '兜底模式没有录音，不发 player:replay');
   verifyFinale(h);
 });
 
@@ -218,8 +252,6 @@ await test('normal cold-start full run: silent attempts stay silent, finale orde
   assert.equal(h.of('attempt:end').length, 5);
   assert.ok(h.of('attempt:end').every(e => e.payload.reason === 'silence'));
   assert.ok(h.streams.every(s => s.track.stopped === 1));
-  assert.deepEqual(Array.from(h.of('melody:replay')[0].payload.notes, n => n.midi),
-    h.of('melody:phraseStart').flatMap(e => Array.from(e.payload.notes, n => n.midi)));
   verifyFinale(h);
 });
 
@@ -256,11 +288,14 @@ await test('audio-unavailable fallback also completes without a crashing AudioCo
 });
 
 await test('abort from synchronous state/event listeners never rearms abandoned work', async () => {
+  // ⚠️ v1.1.0：`player:replay` 只在**确实录到有效演唱段**时才发（PRD §7.5.1.4），
+  //    本 harness 是静音路径，该事件永不出现，无法作为中止点。
+  //    终局的权威事件是 phase === 'RESULT'。
   const targets = [
     ['state:change', p => p.phase === 'PERM_REQUEST'],
     ['state:change', p => p.subPhase === 'LISTEN'],
     ['melody:phraseStart'], ['attempt:countdown'], ['attempt:start'], ['attempt:pitch'], ['attempt:end'],
-    ['state:change', p => p.subPhase === 'PULL'], ['phrase:result'], ['game:finale'], ['melody:replay'],
+    ['state:change', p => p.subPhase === 'PULL'], ['phrase:result'], ['game:finale'],
     ['state:change', p => p.phase === 'RESULT']
   ];
   for (const [event, match = () => true] of targets) {

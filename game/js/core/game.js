@@ -46,6 +46,10 @@
 
   /** 采样间隔（与 pumpPitch 的定时器一致），用于按帧号换算毫秒 */
   var PITCH_INTERVAL_MS = 50;
+  /** 海妖唱完 → 开录的准备时间：3 × 500ms = 1.5s（v1.1.0 定案，原 700ms 一档已作废） */
+  var COUNTDOWN_STEP_MS = 500;
+  /** LISTEN 子阶段的下限，防止极短乐句一闪而过 */
+  var LISTEN_MIN_MS = 600;
   /** 去留白后总时长超过此值即 1.2 倍速（PRD §7.5.1.4 决策） */
   var PCM_SPEEDUP_THRESHOLD_MS = 15000;
   var PCM_SPEEDUP_RATE = 1.2;
@@ -103,6 +107,8 @@
   var lastVoicedAt = 0;
   var lastPitchSent = 0;
   var countdownValue = 0;
+  /** 防止重入：倒计时期间再次 startCountdown 会叠加出多条 500ms 链 */
+  var countdownActive = false;
 
   var fallbackTarget = null;      // 兜底模式的节奏目标
   var fallbackTaps = [];
@@ -159,6 +165,8 @@
 
   function setSub(next) {
     subPhase = next;
+    // 离开 COUNTDOWN 即认为倒计时链已结束，重入保护随之解除
+    if (next !== 'COUNTDOWN') countdownActive = false;
     return emit('state:change', { phase: phase, subPhase: subPhase, phraseIndex: phraseIndex });
   }
 
@@ -377,27 +385,45 @@
     // 海妖唱出本乐句；后端负责播放，前端跟着 notes[] 做视觉同步（契约 C3）
     var sungS = Audio.playPhrase(notes);
     var noteEndMs = notes.reduce(function (end, n) { return Math.max(end, n.startMs + n.durationMs); }, 0);
-    var listenMs = Math.max(900, Math.round(Math.max(sungS * 1000, noteEndMs)) + 260);
+    // 准备时间定案 1.5s：COUNTDOWN 严格从"海妖真正唱完"起算，
+    // 所以只加排程提前量（AUDIO_LEAD_S），不再加任何额外留白。
+    var leadMs = Math.round((Audio.AUDIO_LEAD_S || 0) * 1000);
+    var listenMs = Math.max(
+      noteEndMs + leadMs,
+      Math.round(sungS * 1000) + leadMs,
+      LISTEN_MIN_MS
+    );
 
     listenTimer = later(function () {
       listenTimer = null;
       if (!setSub('COUNTDOWN')) return;
-      if (phase === 'RHYTHM_FALLBACK') countdownStep(3);
-      else calibrateNoise(function () { countdownStep(3); });
+      // 噪音基线在倒计时窗口内并行采完（≈500ms < 1500ms），
+      // 不再串在倒计时之前——否则准备时间会变成 1.5s + 0.5s。
+      // 校准只读 analyser，不影响倒计时，也不影响随后的录音。
+      if (phase !== 'RHYTHM_FALLBACK') calibrateNoise(function () {});
+      countdownStep(3);
     }, listenMs);
   }
 
   function countdownStep(n) {
+    // 重入保护：已有一条倒计时链在跑时忽略新的进入请求
+    if (countdownActive && n === 3) return;
     countdownValue = n;
-    if (!emit('attempt:countdown', { from: n })) return;
+    var wasActive = countdownActive;
+    countdownActive = true;
+    if (!emit('attempt:countdown', { from: n })) {
+      countdownActive = wasActive;
+      return;
+    }
     if (n > 1) {
-      later(function () { countdownStep(n - 1); }, 700);
+      later(function () { countdownStep(n - 1); }, COUNTDOWN_STEP_MS);
     } else {
       later(function () {
+        countdownActive = false;
         // 正常模式与兜底模式共用倒计时，收口处分流
         if (phase === 'RHYTHM_FALLBACK') beginFallbackRecord();
         else beginRecord();
-      }, 700);
+      }, COUNTDOWN_STEP_MS);
     }
   }
 

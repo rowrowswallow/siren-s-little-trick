@@ -84,6 +84,90 @@ const excluded = [];
 
 const IMAGE_EXT = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
 
+// ---------------------------------------------------------------- 两版构建
+
+/** `--no-camera`：产出**不含摄像头**的过审版（PRD §7.5.1.3 / 契约 C7.7） */
+const NO_CAMERA = Boolean(getArg('no-camera', false));
+
+/**
+ * 摄像头**专有**标识。`--no-camera` 构建用它做残留校验：
+ * 产物里只要出现任何一个，就说明切割没切干净，**直接拦下打包**。
+ *
+ * ⚠️ 刻意**不收**裸 `getUserMedia`：麦克风也用同一个 API
+ *    （`getUserMedia({ audio: ... })` 是本作核心，v1.1.0 必须有）。
+ *    若把裸 getUserMedia 当摄像头痕迹，麦克风代码会被误报 —— 实测踩过。
+ *    摄像头调用一定伴随 `video:` 约束或 `facingMode`，用这两条覆盖即可。
+ */
+const CAMERA_TOKENS = [
+  { re: /\bfacingMode\b/, name: 'facingMode（前置/后置选择）' },
+  { re: /\bMediaRecorder\b/, name: 'MediaRecorder（录像）' },
+  { re: /\bcaptureStream\b/, name: 'captureStream（画布录制）' },
+  { re: /\bvideo\s*:\s*(?:true|\{)/, name: 'getUserMedia 的 video 约束' },
+  { re: /getUserMedia\s*\([^)]*\bvideo\b/, name: 'getUserMedia 请求视频轨' },
+  { re: /createObjectURL/, name: 'createObjectURL（视频预览常用）' },
+];
+
+/**
+ * 摄像头代码切割标记（**前端埋标记，打包器负责切除**）。
+ *
+ * 用法：标记各占一行，且是行注释：
+ *
+ *   // CAMERA:BEGIN
+ *   ...只有带摄像头的版本才存在的代码...
+ *   // CAMERA:END
+ *
+ * `--no-camera` 构建把两标记**连同其间内容**整段删除，并断言零残留。
+ * 标记本身也会被删掉，因此产物里不会留下任何线索。
+ */
+const CAMERA_BEGIN = 'CAMERA:BEGIN';
+const CAMERA_END = 'CAMERA:END';
+
+/**
+ * 按标记切除摄像头代码。
+ * 标记不配对时报错（宁可拦下，也不要产出半截代码）。
+ */
+function stripCameraBlocks(code, fileRel) {
+  const lines = code.split('\n');
+  const out = [];
+  let inside = false;
+  let removed = 0;
+  let beginLine = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (!inside && line.indexOf(CAMERA_BEGIN) !== -1) {
+      inside = true;
+      beginLine = i + 1;
+      removed += 1;
+      continue;
+    }
+    if (inside) {
+      removed += 1;
+      if (line.indexOf(CAMERA_END) !== -1) inside = false;
+      continue;
+    }
+    out.push(line);
+  }
+  if (inside) {
+    errors.push({
+      file: fileRel,
+      message: `CAMERA:BEGIN（第 ${beginLine} 行）没有对应的 CAMERA:END —— 切割标记不配对，` +
+        '为避免产出半截代码，已终止打包',
+    });
+    return { code: code, removedLines: 0, unbalanced: true };
+  }
+  return { code: out.join('\n'), removedLines: removed, unbalanced: false };
+}
+
+/** 扫产物里是否还有摄像头痕迹（--no-camera 的门禁） */
+function scanCameraTokens(text) {
+  const hits = [];
+  for (const t of CAMERA_TOKENS) {
+    t.re.lastIndex = 0;
+    if (t.re.test(text)) hits.push(t.name);
+  }
+  return hits;
+}
+
 // ---------------------------------------------------------------- 校验规则
 
 /**
@@ -515,12 +599,61 @@ function main() {
   console.log('');
   console.log('✓ 校验通过：结构 / 文件类型 / CSP / 端能力 / 引用完整性 全部符合规范');
 
+  // ---------------- 两版构建：--no-camera 时按标记切除摄像头代码 ----------------
+  const entries = files.map((f) => ({ name: f.rel, data: fs.readFileSync(f.abs) }));
+
+  if (NO_CAMERA) {
+    console.log('');
+    console.log('【过审版构建】--no-camera：切除摄像头相关代码');
+    let strippedTotal = 0;
+    let strippedFiles = 0;
+    for (const e of entries) {
+      const isText = /\.(?:html|css|js|json)$/i.test(e.name);
+      if (!isText) continue;
+      const text = e.data.toString('utf8');
+      if (text.indexOf(CAMERA_BEGIN) === -1) continue;
+      const r = stripCameraBlocks(text, e.name);
+      if (r.unbalanced) {
+        console.log('');
+        console.log('切割标记不配对，已终止打包。');
+        process.exit(2);
+      }
+      e.data = Buffer.from(r.code, 'utf8');
+      strippedTotal += r.removedLines;
+      strippedFiles += 1;
+      console.log(`  · ${e.name}：删除 ${r.removedLines} 行`);
+    }
+    if (!strippedFiles) {
+      console.log('  ℹ 未发现任何 CAMERA:BEGIN 标记 —— 前端尚未引入摄像头代码，本版天然不含');
+    } else {
+      console.log(`  合计删除 ${strippedTotal} 行，涉及 ${strippedFiles} 个文件`);
+    }
+
+    // 残留门禁：切割后绝不能还有任何摄像头痕迹
+    const leaks = [];
+    for (const e of entries) {
+      if (!/\.(?:html|css|js|json)$/i.test(e.name)) continue;
+      const hits = scanCameraTokens(e.data.toString('utf8'));
+      if (hits.length) leaks.push(`${e.name} → ${hits.join(', ')}`);
+    }
+    if (leaks.length) {
+      console.log('');
+      console.log('✗ 摄像头残留校验未通过（过审版必须零残留）：');
+      for (const l of leaks) console.log('  ✗ ' + l);
+      console.log('');
+      console.log('请把摄像头代码包进 // CAMERA:BEGIN ... // CAMERA:END 标记里，再重新打包。');
+      process.exit(2);
+    }
+    console.log('  ✓ 残留校验通过：产物中零摄像头痕迹（权限申请时不要勾摄像头）');
+  }
+
   if (CHECK_ONLY) {
+    console.log('');
     console.log('（--check-only：跳过打包）');
     return;
   }
 
-  const zip = buildZip(files.map((f) => ({ name: f.rel, data: fs.readFileSync(f.abs) })));
+  const zip = buildZip(entries);
   fs.mkdirSync(path.dirname(OUT_ZIP), { recursive: true });
   fs.writeFileSync(OUT_ZIP, zip);
 
@@ -528,6 +661,11 @@ function main() {
   console.log('');
   console.log(`✓ 已打包：${rel(OUT_ZIP)}  (${kb(zip.length)}, sha256:${sha})`);
   console.log(`  zip 根目录即入口：index.html 位于根，解压后顶层直接是文件`);
+  if (NO_CAMERA) {
+    console.log('  版本：**过审版（无摄像头）** —— 权限只勾麦克风 + 本地存储');
+  } else {
+    console.log('  版本：**完整版（含摄像头，若有标记）** —— 需额外勾选摄像头权限');
+  }
   console.log('');
   console.log('下一步：把该 zip 上传到小红书「小工具」后台，选择版本号与所需权限后发布。');
 }

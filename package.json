@@ -1,6 +1,6 @@
 {
   "name": "siren-minitool",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "description": "《塞壬的小把戏》离线 H5 游戏 · 完整前端与声音玩法，打包为可上传 zip",
@@ -9,6 +9,7 @@
     "check": "node tools/selfcheck.mjs",
     "verify": "node tools/selfcheck.mjs && node tools/test-pitch.mjs && node tools/test-score.mjs && node tools/test-fleet.mjs && node tools/test-hum.mjs && node tools/test-integration.mjs && node tools/test-lifecycle.mjs && node tools/pack.mjs --check-only",
     "build": "node tools/pack.mjs",
+    "build:review": "node tools/pack.mjs --no-camera --out=dist/haixiao-minitool-review.zip",
     "curve": "node tools/show-wreck-rate.mjs",
     "serve": "node tools/serve.mjs"
   }

@@ -690,6 +690,69 @@ console.log('[4b] 新手引导关（v1.1.0 / 契约 C2 的 TUTORIAL phase）');
   setTutorialDone(true);
 }
 
+// ================================================================ 4c
+
+console.log('');
+console.log('[4c] 准备时间 = 1.5s（v1.1.0 定案；曾错写成 3 × 700ms）');
+{
+  // 1.5s 这个数字此前没有任何用例锁定，所以 700ms 一档的写法一直没被发现。
+  // 这里的判据直接来自 PRD「海妖唱完 → 开录 = 1.5s」：
+  //   期望间隔 = 尾部余量 + 1.5s，其中尾部余量 = max(0, 乐句结束时刻 - 实际播放时长)
+  setTutorialDone(true);
+  events.length = 0;
+  micStub.state.amp = 0.4;
+  await Siren.init({ seed: 4242 });
+  Siren.start();
+  await Promise.resolve();
+  await Promise.resolve();
+  await clock.advanceTo(clock.now() + 50);
+
+  // 先推进到第一次开录：LISTEN(≈2.9s) + COUNTDOWN(1.5s)
+  let g3 = 0;
+  while (ofType('attempt:start').length < 1) {
+    await clock.advanceTo(clock.now() + 50);
+    if (++g3 > 400) break;
+  }
+
+  const PREP_MS = 1500;
+  const LEAD_MS = 80;          // Audio.AUDIO_LEAD_S：海妖实际出声比排程基准晚 80ms
+  let expectedPrep = null;
+  for (const start of ofType('attempt:start')) {
+    const phrase = ofType('melody:phraseStart').filter((p) => p.at <= start.at).pop();
+    if (!phrase) continue;
+    const noteEndMs = phrase.payload.notes.reduce(
+      (m, n) => Math.max(m, n.startMs + n.durationMs), 0);
+    // 准备时间 = 海妖实际唱完 → 开录。
+    // 海妖真正唱完的时刻 = 乐句结束 + 排程提前量；倒计时必须正好从这一刻起算。
+    const sirenDoneAt = phrase.at + noteEndMs + LEAD_MS;
+    const countdown = ofType('attempt:countdown').filter((c) => c.at >= phrase.at && c.at <= start.at);
+    const cdStart = countdown.length ? countdown[0].at : null;
+    const prep = cdStart === null ? -1 : start.at - cdStart;
+    if (cdStart !== null) {
+      check('倒计时从"海妖唱完"那一刻起算（phrase ' + phrase.payload.phraseIndex + '）',
+        Math.abs(cdStart - sirenDoneAt) <= 120,
+        '倒计时起点 ' + cdStart + ' vs 海妖唱完 ' + Math.round(sirenDoneAt) +
+        '（偏差 ' + Math.round(cdStart - sirenDoneAt) + 'ms）');
+    }
+    if (expectedPrep === null) expectedPrep = prep;
+    const ok = Math.abs(prep - PREP_MS) <= 120;
+    check('准备时间 = 1.5s（' + (ok ? '' : '✗ ') + 'phrase ' + phrase.payload.phraseIndex +
+      ' 乐句 ' + Math.round(noteEndMs) + 'ms）',
+      ok, prep + 'ms（期望 ' + PREP_MS + '±120）');
+  }
+  check('至少量到一次准备时间', expectedPrep !== null,
+    expectedPrep === null ? '(没量到 attempt:start)' : expectedPrep + 'ms');
+
+  // 倒计时必须是 3 档，且序列形如 3,2,1 各自重复若干帧
+  const countdownSeq = ofType('attempt:countdown').map((e) => e.payload.from);
+  const cdFirst = countdownSeq.slice(0, countdownSeq.indexOf(1) + 1);
+  check('倒计时为 3 档且逐档递减到 1（3 个 500ms）',
+    cdFirst.length >= 3 && cdFirst[0] === 3 && cdFirst[cdFirst.length - 1] === 1 &&
+    cdFirst.every((v, i) => i === 0 || v <= cdFirst[i - 1]),
+    cdFirst.join(',') || '(无)');
+  Siren.abort();
+}
+
 // ================================================================ 5
 
 console.log('');

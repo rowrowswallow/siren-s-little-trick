@@ -42,6 +42,9 @@
 
   var BPM = 92;
 
+  /** 排程提前量：playPhrase 默认比 ctx.currentTime 晚这么久开始出声 */
+  var AUDIO_LEAD_S = 0.08;
+
   // ---------------------------------------------------------------- 状态
 
   var ctx = null;
@@ -341,12 +344,16 @@
    * 播放一个乐句（notes[] 来自契约 C3：{midi, startMs, durationMs, degree}）
    * @param {Array} notes
    * @param {Object} [opts] opts.when（AudioContext 时间基准）, opts.gain, opts.reverb
-   * @returns {number} 从调用时刻到最后一个音结束的时长（秒，含排程提前量）
+   * @returns {number} 乐句本身时长（秒）——**不含排程提前量**
+   *
+   * ⚠️ 返回值语义必须是「乐句时长」。曾经改成 `lead + 时长`（为了修 lab 听不到声音），
+   *    而 game.js 仍按旧语义计算准备时间，凭空多出 140ms。
+   *    排程提前量请用 AUDIO_LEAD_S 单独加，不要混进返回值。
    */
   function playPhrase(notes, opts) {
     opts = opts || {};
     if (!ctx || !notes || !notes.length) return 0;
-    var base = opts.when !== undefined ? opts.when : ctx.currentTime + 0.08;
+    var base = opts.when !== undefined ? opts.when : ctx.currentTime + AUDIO_LEAD_S;
     var Pitch = Siren.Pitch;
     var totalS = 0;
 
@@ -364,7 +371,7 @@
       });
       totalS = Math.max(totalS, n.startMs / 1000 + durS);
     }
-    return Math.max(0, base - ctx.currentTime) + totalS;
+    return totalS;
   }
 
   /** 提示音（玩家演唱时的音块提示：极短极干极中性） */
@@ -540,6 +547,7 @@
     quarterMs: quarterMs,
     BPM: BPM,
     DURATION_GAP_MS: DURATION_GAP_MS,
+    AUDIO_LEAD_S: AUDIO_LEAD_S,
     _constants: {
       HARMONICS: HARMONICS, DETUNE_CENTS: DETUNE_CENTS, DETUNE_GAIN: DETUNE_GAIN,
       FORMANT_1: FORMANT_1, FORMANT_2: FORMANT_2, WET: WET, IR: IR, VIBRATO: VIBRATO
