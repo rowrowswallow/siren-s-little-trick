@@ -1088,20 +1088,25 @@
       // 前缀由 store.js 在加载时固定；这里只接受默认前缀，避免破坏既定键名
       if (options.storagePrefix !== 'siren.' && !notice('STORAGE_FAILED')) return Promise.resolve(getState());
     }
-    if (options.seed !== undefined && options.seed !== null) {
-      seed = Number(options.seed) || 0;
-    } else {
-      var saved = Store.getNumber(Store.KEYS.SEED, 0);
-      seed = saved || (Math.floor(Math.random() * 900000) + 1000);
-    }
-    Store.set(Store.KEYS.SEED, seed);
-    if (!Store.available && !notice('STORAGE_FAILED')) return Promise.resolve(getState());
 
-    phraseIndex = 0;
-    shipsSpawned = 0;
-    shipsWrecked = 0;
-    setPhase('HOME', null);
-    return Promise.resolve(getState());
+    // ⚠️ v1.1.0：必须先异步初始化持久层，再读任何业务数据。
+    //    miniTool.getStorage 是 Promise 的（小工具能力清单 §3.7），
+    //    不等它完成就去读种子/引导标记，会拿到空值。
+    return Store.init().then(function () {
+      if (options.seed !== undefined && options.seed !== null) {
+        seed = Number(options.seed) || 0;
+      } else {
+        var saved = Store.getNumber(Store.KEYS.SEED, 0);
+        seed = saved || (Math.floor(Math.random() * 900000) + 1000);
+      }
+      Store.set(Store.KEYS.SEED, seed);
+
+      phraseIndex = 0;
+      shipsSpawned = 0;
+      shipsWrecked = 0;
+      setPhase('HOME', null);
+      return getState();
+    });
   }
 
   function start() {

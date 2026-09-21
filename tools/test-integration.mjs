@@ -423,11 +423,21 @@ Siren.on('attempt:start', () => {
   recordedPhrases += 1;
 });
 
+// storeMap 是 localStorage 桩。⚠️ v1.1.0 起 Store 有内存缓存（见 store.js 的异步写穿设计），
+// 直接改 storeMap 不会被 Store 看到。所以对存储的操作一律走 Store 自己的 API，
+// 并重新 init 让缓存重载。
+const StoreApi = Siren.Store;
+const setTutorialDone = (v) => {
+  if (v) StoreApi.set(StoreApi.KEYS.TUTORIAL_DONE, '1');
+  else StoreApi.remove(StoreApi.KEYS.TUTORIAL_DONE);
+};
+const tutorialDoneFlag = () => StoreApi.get(StoreApi.KEYS.TUTORIAL_DONE, '');
+
 await Siren.init({ seed: 4821 });
 segLog.length = 0;             // 只看 test 4 这一次运行
 // 标记引导关已完成：本节测的是**正片**的 5 乐句流程。
 // 引导关本身在【4b】小节单独测（它会产生额外的录音与船队，会污染这里的计数）。
-storeMap.set('siren.tutorialDone', '1');
+setTutorialDone(true);
 Siren.start();
 await Promise.resolve();
 await Promise.resolve();
@@ -614,7 +624,7 @@ console.log('');
 console.log('[4b] 新手引导关（v1.1.0 / 契约 C2 的 TUTORIAL phase）');
 {
   // 清掉「已完成」标记，重新走一次首局
-  storeMap.delete('siren.tutorialDone');
+  setTutorialDone(false);
   events.length = 0;
   micStub.state.amp = 0.4;
   await Siren.init({ seed: 777 });
@@ -652,12 +662,12 @@ console.log('[4b] 新手引导关（v1.1.0 / 契约 C2 的 TUTORIAL phase）');
     ofType('phrase:result').length === 0,
     'phrase:result ' + ofType('phrase:result').length + ' 次');
   check('通过后写入 tutorialDone 标记',
-    storeMap.get('siren.tutorialDone') === '1',
-    String(storeMap.get('siren.tutorialDone')));
+    tutorialDoneFlag() === '1',
+    tutorialDoneFlag());
   Siren.abort();
 
   // ---- 跳过路径
-  storeMap.delete('siren.tutorialDone');
+  setTutorialDone(false);
   events.length = 0;
   await Siren.init({ seed: 888 });
   Siren.start();
@@ -673,11 +683,11 @@ console.log('[4b] 新手引导关（v1.1.0 / 契约 C2 的 TUTORIAL phase）');
     Siren.getState().phase === 'LEARN_LOOP',
     'phase=' + Siren.getState().phase);
   check('跳过后也写入标记（不再重复引导）',
-    storeMap.get('siren.tutorialDone') === '1',
-    String(storeMap.get('siren.tutorialDone')));
+    tutorialDoneFlag() === '1',
+    tutorialDoneFlag());
   Siren.abort();
   events.length = 0;
-  storeMap.set('siren.tutorialDone', '1');
+  setTutorialDone(true);
 }
 
 // ================================================================ 5
@@ -749,6 +759,86 @@ check('静默时只广播 NO_INPUT 技术码，无任何中文提示',
   'NO_INPUT ' + noInput.length + ' 次');
 Siren.abort();
 stopSilentAttempt();
+
+// ================================================================ 7b
+
+console.log('');
+console.log('[7b] 存储层：内存缓存 + 异步写穿（PRD §7.5.1.3-C）');
+{
+  const mtCalls = { set: [], get: [] };
+  const mtData = new Map();
+
+  // 装一个 miniTool 桩，并声明为高版本客户端（buildVersion 9462004 = 9.46.2）
+  win.xhs = {
+    launchOptions: { miniToolEnv: { buildVersion: 9462004 } },
+    miniTool: {
+      setStorage(o) { mtCalls.set.push(o.key); mtData.set(o.key, o.data); return Promise.resolve({ errMsg: 'setStorage:ok' }); },
+      getStorage(o) {
+        mtCalls.get.push(o.key);
+        if (!mtData.has(o.key)) return Promise.reject({ errMsg: 'getStorage:fail not found' });
+        return Promise.resolve({ data: mtData.get(o.key) });
+      },
+      removeStorage(o) { mtData.delete(o.key); return Promise.resolve({ errMsg: 'removeStorage:ok' }); },
+    },
+  };
+
+  // 全新状态：清缓存 + 清 localStorage，再 init
+  Siren.Store._resetForTest();
+  storeMap.clear();
+  const backend = await Siren.Store.init();
+  check('检测到端能力后选用 miniTool 作为后端',
+    backend === 'miniTool' && Siren.Store.backend() === 'miniTool',
+    'backend=' + backend + '，客户端版本 ' + Siren.Store.clientVersion());
+  check('init 时从 miniTool 逐个读回已知键',
+    mtCalls.get.length > 0, mtCalls.get.length + ' 个键');
+
+  // 写：同步可读 + 异步落盘
+  Siren.Store.set(Siren.Store.KEYS.BEST_WRECKED, 42);
+  check('写入后同步可读（前端无需改调用方式）',
+    Siren.Store.getNumber(Siren.Store.KEYS.BEST_WRECKED, 0) === 42,
+    String(Siren.Store.getNumber(Siren.Store.KEYS.BEST_WRECKED, 0)));
+  await Promise.resolve();
+  await Promise.resolve();
+  check('写入已异步落盘到 miniTool',
+    mtData.get(Siren.Store.KEYS.BEST_WRECKED) === '42',
+    String(mtData.get(Siren.Store.KEYS.BEST_WRECKED)));
+  check('localStorage 也同步写了（降级层）',
+    storeMap.get(Siren.Store.KEYS.BEST_WRECKED) === '42',
+    String(storeMap.get(Siren.Store.KEYS.BEST_WRECKED)));
+
+  // 重新水合：清缓存 + 清 localStorage，只靠 miniTool 恢复
+  Siren.Store._resetForTest();
+  storeMap.clear();
+  await Siren.Store.init();
+  check('清空本地后能从 miniTool 恢复（持久层真的生效）',
+    Siren.Store.getNumber(Siren.Store.KEYS.BEST_WRECKED, 0) === 42,
+    String(Siren.Store.getNumber(Siren.Store.KEYS.BEST_WRECKED, 0)));
+
+  // 低版本客户端应降级到 localStorage
+  win.xhs.launchOptions.miniToolEnv.buildVersion = 9400001;   // 9.40.0 < 9.46.0
+  Siren.Store._resetForTest();
+  const oldBackend = await Siren.Store.init();
+  check('低版本客户端（< 9.46.0）降级到 localStorage',
+    oldBackend === 'localStorage',
+    'backend=' + oldBackend + '（客户端 ' + Siren.Store.clientVersion() + '）');
+
+  // 完全没有端能力（普通浏览器）也不能崩
+  delete win.xhs;
+  Siren.Store._resetForTest();
+  const plainBackend = await Siren.Store.init();
+  check('无端能力时降级到 localStorage 且不崩',
+    plainBackend === 'localStorage',
+    'backend=' + plainBackend);
+  Siren.Store.set(Siren.Store.KEYS.PLAYS, 7);
+  check('降级后读写仍正常',
+    Siren.Store.getNumber(Siren.Store.KEYS.PLAYS, 0) === 7,
+    String(Siren.Store.getNumber(Siren.Store.KEYS.PLAYS, 0)));
+
+  // 复位，避免影响后续小节
+  Siren.Store._resetForTest();
+  await Siren.Store.init();
+  setTutorialDone(true);
+}
 
 // ================================================================ 8
 
