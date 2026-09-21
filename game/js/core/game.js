@@ -1201,6 +1201,27 @@
     _setPhase: setPhase,
     _startFallbackRun: startFallbackRun,
     _beginFallbackRecord: beginFallbackRecord,
-    _config: CFG
+    _config: CFG,
+    /**
+     * 内部：PCM 缓存真实占用（离线测内存用，不对外暴露）。
+     * ⚠️ 硬上限是 PCM_MAX_SAMPLES 个样本/句——超出后**静默丢弃**后续采样，
+     *    所以真实峰值由这个上限决定，而不是"句长 × 采样率"的估算。
+     */
+    _pcmStats: function () {
+      var per = 0, total = 0, i, n;
+      for (i = 0; i < pcmPhrases.length; i += 1) {
+        n = pcmPhrases[i].pcm ? pcmPhrases[i].pcm.length : 0;
+        per = Math.max(per, n);
+        total += n;
+      }
+      return {
+        phrases: pcmPhrases.length,
+        pcmMaxSamples: PCM_MAX_SAMPLES,
+        samplesPerPhraseMax: per,
+        samplesTotal: total,
+        bytesTotal: total * 4,                    // Float32 = 4 字节/样本
+        bytesCap: PCM_MAX_SAMPLES * 4 * CFG.PHRASES
+      };
+    }
   };
 })(typeof window !== 'undefined' ? window : (typeof self !== 'undefined' ? self : {}));

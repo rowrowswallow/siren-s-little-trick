@@ -618,6 +618,26 @@ check('有乐句打出真实分数（评分链连通）',
   '逐句触礁：' + ofType('phrase:result').map((e) => e.payload.newWrecked).join(', ') +
   '（绝对分数见 test-score.mjs）');
 
+// ---- PCM 缓存真实占用（PRD §7.5.1.5 的内存决策依据）
+// ⚠️ 必须在任何 abort() 之前量：abort() 会清空 pcmPhrases。
+//    这里量的是**真实占用**，不是"句长 × 采样率"的估算——
+//    每句有硬上限 PCM_MAX_SAMPLES，超出后静默丢弃后续采样。
+{
+  const st = Siren.Game._pcmStats();
+  const capMB = (st.bytesCap / 1024 / 1024).toFixed(2);
+  const realMB = (st.bytesTotal / 1024 / 1024).toFixed(2);
+  console.log('    PCM 缓存：' + st.phrases + ' 句，合计 ' + st.samplesTotal +
+    ' 样本 = ' + realMB + ' MB（单句上限 ' + st.pcmMaxSamples +
+    ' 样本 ≈ ' + (st.pcmMaxSamples / 48000).toFixed(2) + 's @48kHz）');
+  console.log('    硬上限（5 句全部顶格）= ' + capMB + ' MB');
+  check('确实缓存了多句 PCM（终局回放有料可放）', st.phrases >= 1, st.phrases + ' 句');
+  check('PCM 缓存不超过硬上限', st.bytesTotal <= st.bytesCap,
+    realMB + ' MB / 上限 ' + capMB + ' MB');
+  check('单句 PCM 不超过单句上限（超出会被静默丢弃）',
+    st.samplesPerPhraseMax <= st.pcmMaxSamples,
+    st.samplesPerPhraseMax + ' / ' + st.pcmMaxSamples + ' 样本');
+}
+
 // ================================================================ 4b
 
 console.log('');

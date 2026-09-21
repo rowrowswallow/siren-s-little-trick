@@ -101,6 +101,10 @@ console.log(`  模块加载后堆增量：${fmt(afterLoad - before)}`);
 
 // 关键预分配：YIN 的差分函数缓冲
 const sr = 48000;
+// PCM 缓存的硬上限（game.js 的 PCM_MAX_SAMPLES × Float32 4 字节 × 5 句）
+const PCM_MAX_SAMPLES = 320000;
+const PCM_MAX_BYTES = PCM_MAX_SAMPLES * 4;
+const PCM_HARD_CAP = PCM_MAX_BYTES * 5;
 const tauMax = Math.ceil(sr / 90);
 const yinBytes = (tauMax + 3) * 4;
 console.log(`  YIN 缓冲（Float32Array ${tauMax + 3}）：${fmt(yinBytes)}  ← 唯一的算法级预分配`);
@@ -147,17 +151,22 @@ console.log(`  → 这部分完全是临时对象，一局结束即可回收`);
 // ---------------------------------------------------------------- 4. PCM 预测
 
 console.log('');
-console.log('=== 4. 若要缓存玩家录音（PCM Float32）===');
+console.log('=== 4. 缓存玩家录音（PCM Float32）===');
 console.log('  说明：AudioBuffer 用 Float32，4 字节/样本；采样率取 48000。');
+console.log('');
+console.log('  ⚠️ 真实峰值由 game.js 的 PCM_MAX_SAMPLES 硬上限决定，不是"句长 × 采样率"：');
+console.log('     触顶后**静默丢弃**后续采样（内存有上界，但过长演唱的尾巴录不进回放）。');
 console.log('');
 console.log('  每句录音时长 | 单句 PCM   | 5 句合计   | 备注');
 for (const sec of [2, 3, 4, 6]) {
   const per = sr * sec * 4;
-  console.log(`  ${String(sec).padStart(11)}s | ${fmt(per).padStart(10)} | ${fmt(per * 5).padStart(10)} | ${sec === 6 ? '单句上限（RECORD_MAX_MS）' : (sec === 3 ? '实测典型有效时长' : '')}`);
+  const capped = per > PCM_MAX_BYTES ? ' ⚠ 超单句上限，实际只存 ' + fmt(PCM_MAX_BYTES) : '';
+  console.log(`  ${String(sec).padStart(11)}s | ${fmt(per).padStart(10)} | ${fmt(per * 5).padStart(10)} | ${sec === 6 ? '单句上限（RECORD_MAX_MS）' : ''}${capped}`);
 }
 console.log('');
-console.log('  参考：本机实测玩家的"有效演唱时长"约 1.1–2.6 秒/句（试唱台数据），');
-console.log('        但容器按上限预留更安全。');
+console.log(`  硬上限：单句 ${PCM_MAX_SAMPLES} 样本 = ${fmt(PCM_MAX_BYTES)}，5 句合计 ${fmt(PCM_HARD_CAP)}`);
+console.log('  ⭐ 上表只是估算。**真实占用以运行时实测为准**：');
+console.log('     tools/test-integration.mjs §4 会读取一局的真实 PCM 缓存（Node 下实测 2.89 MB / 757,760 样本）。');
 
 // ---------------------------------------------------------------- 5. 汇总
 
@@ -170,8 +179,8 @@ console.log('  项目              | 体积/内存     | 何时占用');
 console.log(`  上传包（磁盘）     | ${fmt(totalBytes).padStart(11)} | 常驻`);
 console.log(`  后端模块 + 预分配  | ${fmt(afterLoad - before + yinBytes + irBytes).padStart(11)} | 常驻`);
 console.log(`  单局临时对象峰值   | ${fmt(afterRun - beforeRun).padStart(11)} | 一局内`);
-console.log(`  PCM 缓存（3s/句）  | ${fmt(sr * 3 * 4 * 5).padStart(11)} | 仅 FINALE 前`);
-console.log(`  PCM 缓存（6s/句）  | ${fmt(sr * 6 * 4 * 5).padStart(11)} | 仅 FINALE 前（上限）`);
+console.log(`  PCM 缓存（实测）   | ${fmt(2.89 * 1024 * 1024).padStart(11)} | 仅 FINALE 前`);
+console.log(`  PCM 缓存（硬上限） | ${fmt(PCM_HARD_CAP).padStart(11)} | 5 句全部顶格`);
 console.log('');
 console.log('  ⚠️ 这是 Node 侧量的；真机 WebView 的 JS 堆与前端渲染占用需在设备上量。');
 console.log('     探针/试唱台可加一段 performance.memory 读数，需要的话告诉我。');
