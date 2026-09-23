@@ -28,6 +28,7 @@
           <svg class="icon boat-icon" viewBox="0 0 64 56" aria-hidden="true"><path class="boat-hull" d="M7 33h50l-7 15H15Z" /><path class="boat-cabin" d="m18 32 3-17h23l3 17" /><path class="boat-flag" d="M32 15V3l12 5-12 5" /><path d="M27 24v2m11-2v2" /><path class="boat-water" d="M12 51q6 4 12 0t12 0 12 0" /></svg>
           <strong id="ship-number">0</strong><span>条船</span>
         </div>
+        <button class="quiet-button skip-button" type="button" data-action="skip-tutorial" aria-label="跳过练习，直接开始" hidden>跳过练习</button>
       </header>
 
       <section class="home-view" id="home-view">
@@ -43,6 +44,7 @@
         <h2 id="state-title">听，她在唱</h2>
         <p id="state-hint"></p>
         <div id="countdown" class="countdown" aria-label="准备开口" hidden><i></i><i></i><i></i></div>
+        <div id="replay-wave" class="replay-wave" aria-hidden="true" hidden></div>
       </section>
 
       <section class="permission-view" id="permission-view" hidden aria-live="polite">

@@ -10,7 +10,7 @@
     'ship-counter', 'ship-number', 'phrase-dots', 'phrase-result', 'phrase-number',
     'phrase-result-label', 'revealed-title', 'result-view', 'result-number', 'ending-line',
     'technical-notice', 'rotate-hint', 'boot-message', 'share-view', 'share-card', 'share-fleet',
-    'share-number', 'share-line', 'status-live'];
+    'share-number', 'share-line', 'status-live', 'replay-wave'];
   var el = {};
   ids.forEach(function (id) { el[id] = document.getElementById(id); });
   var controls = {};
@@ -34,7 +34,7 @@
     phrase: -1, replayUsed: false, silent: false, sharing: false, fallback: false,
     total: 0, newShips: 0, ending: 'D', voicedUntil: 0, pitch: 66,
     hero: null, wreckCount: 0, lastNotice: '', noticeAt: -Infinity,
-    noticeTimer: null, denied: false, rotateDismissed: false
+    noticeTimer: null, denied: false, rotateDismissed: false, replay: null
   };
   var frameId = null;
   var lastFrame = 0;
@@ -70,7 +70,7 @@
   function text(id, value) { if (el[id]) el[id].textContent = value; }
   function announce(value) { text('status-live', value); }
   function isPlaying() {
-    return state.phase === 'LEARN_LOOP' || state.phase === 'RHYTHM_FALLBACK';
+    return state.phase === 'LEARN_LOOP' || state.phase === 'RHYTHM_FALLBACK' || state.phase === 'TUTORIAL';
   }
   function clearNotice() {
     window.clearTimeout(ui.noticeTimer);
@@ -112,12 +112,16 @@
     visible('state-heading', false);
     announce('');
   }
-  function resetRun() {
+  function clearFleet() {
     ships.clear();
     ui.total = 0;
     ui.newShips = 0;
     ui.wreckCount = 0;
     ui.hero = null;
+    text('ship-number', '0');
+  }
+  function resetRun() {
+    clearFleet();
     ui.phrase = -1;
     ui.replayUsed = false;
     ui.silent = false;
@@ -128,10 +132,10 @@
     ui.voicedUntil = 0;
     ui.lastNotice = '';
     ui.noticeAt = -Infinity;
+    ui.replay = null;
     tapUntil = 0;
     timing.mode = '';
     clearNotice();
-    text('ship-number', '0');
     text('phrase-number', '0');
     text('result-number', '0');
     text('share-number', '0');
@@ -147,6 +151,10 @@
     var sub = state.subPhase;
     if (phase === 'HOME' && previous.phase !== 'HOME') resetRun();
     if (phase === 'PERM_REQUEST' && previous.phase !== 'PERM_REQUEST') resetRun();
+    // The tutorial's demonstration fleet is not part of the run; the real game starts from an empty sea.
+    if (previous.phase === 'TUTORIAL' && phase !== 'TUTORIAL') clearFleet();
+    if (phase !== 'FINALE') ui.replay = null;
+    var tutorial = phase === 'TUTORIAL';
     ui.fallback = phase === 'RHYTHM_FALLBACK';
     if (sub === 'LISTEN' && (previous.subPhase !== 'LISTEN' || previous.phraseIndex !== state.phraseIndex)) {
       ui.silent = false;
@@ -171,14 +179,17 @@
     visible('phrase-result', phraseResult);
     visible('result-view', result && !ui.sharing);
     visible('share-view', ui.sharing);
-    visible('ship-counter', playing && !phraseResult);
-    visible('phrase-dots', playing && !phraseResult);
+    visible('ship-counter', playing && !phraseResult && !tutorial);
+    visible('phrase-dots', playing && !phraseResult && !tutorial);
     visible('state-heading', ((playing && !phraseResult) || phase === 'FINALE') && !ui.silent);
     visible('countdown', sub === 'COUNTDOWN');
-    if (controls.abort) controls.abort.hidden = !(playing || phase === 'PERM_REQUEST' || phase === 'FINALE');
+    visible('replay-wave', phase === 'FINALE' && !!ui.replay);
+    // FINALE plays the player's own recording and must not offer a way out of it (PRD 7.5.1.4).
+    if (controls.abort) controls.abort.hidden = !(playing || phase === 'PERM_REQUEST');
+    if (controls['skip-tutorial']) controls['skip-tutorial'].hidden = !tutorial;
     if (controls.replay) {
       controls.replay.disabled = phase !== 'LEARN_LOOP' || sub !== 'LISTEN' || ui.replayUsed;
-      controls.replay.hidden = ui.fallback;
+      controls.replay.hidden = ui.fallback || tutorial;
     }
     el.stage.classList.toggle('is-sharing', ui.sharing);
     el['tap-target'].disabled = !(ui.fallback && sub === 'RECORD');
@@ -192,13 +203,19 @@
       ANALYZE: ['', '', ''],
       PULL: ['', '', '']
     };
+    // The tutorial is the only place allowed to explain the controls in words (PRD 7.5.1.2).
+    if (tutorial) {
+      labels.LISTEN = ['先听她唱一小句', '练习一下，不算数', '她在唱'];
+      labels.RECORD = ['跟着哼一遍', '对着麦克风唱', '她在听'];
+      labels.PULL = ['你的声音把船引过来了', '', ''];
+    }
     var label = labels[sub] || ['', '', ''];
-    if (phase === 'FINALE') label = ['听，完整的旋律', '', ''];
+    if (phase === 'FINALE') label = [ui.replay ? '听，这是你唱的' : '', '', ''];
     text('state-title', label[0]);
     text('state-hint', label[1]);
     visible('state-hint', !!label[1]);
     text('mic-label', label[2]);
-    el.siren.dataset.pose = sub === 'LISTEN' || phase === 'FINALE' ? 'sing' : sub === 'RECORD' ? 'listen' : 'idle';
+    el.siren.dataset.pose = sub === 'LISTEN' ? 'sing' : sub === 'RECORD' || phase === 'FINALE' ? 'listen' : 'idle';
     el['phrase-dots'].querySelectorAll('i').forEach(function (dot, index) {
       dot.classList.toggle('past', index < state.phraseIndex);
       dot.classList.toggle('current', index === state.phraseIndex);
@@ -209,7 +226,7 @@
       text('ending-line', endingCopy[ui.total === 0 ? 'D' : ui.ending]);
     }
     if (sub !== 'RECORD') pearl.style.opacity = '0';
-    if (!dock && phase !== 'FINALE') timing.mode = '';
+    if (!dock) timing.mode = '';
     if (label[0] && !ui.silent && (previous.subPhase !== sub || previous.phase !== phase)) announce(label[0]);
     requestFrame();
   }
@@ -217,25 +234,22 @@
   function installNotes(list, mode) {
     notes = (list || []).slice();
     timing.mode = mode;
-    timing.start = now() + (mode === 'listen' || mode === 'finale' ? 80 : 0);
+    timing.start = now() + (mode === 'listen' ? 80 : 0);
     timing.duration = notes.reduce(function (end, note) {
       return Math.max(end, note.startMs + note.durationMs);
     }, 1);
     timing.center = notes.length ? notes.reduce(function (sum, note) { return sum + note.midi; }, 0) / notes.length : 66;
     el['note-track'].textContent = '';
     noteNodes = [];
-    // Finale has its own singing animation; a full song need not become dozens of tiny controls.
-    if (mode !== 'finale') {
-      notes.forEach(function (note) {
-        var node = document.createElement('span');
-        node.className = 'note';
-        node.setAttribute('aria-hidden', 'true');
-        node.style.setProperty('--note-y', clamp((timing.center - note.midi) * 2, -16, 16) + 'px');
-        el['note-track'].appendChild(node);
-        noteNodes.push(node);
-      });
-      el['note-track'].appendChild(pearl);
-    }
+    notes.forEach(function (note) {
+      var node = document.createElement('span');
+      node.className = 'note';
+      node.setAttribute('aria-hidden', 'true');
+      node.style.setProperty('--note-y', clamp((timing.center - note.midi) * 2, -16, 16) + 'px');
+      el['note-track'].appendChild(node);
+      noteNodes.push(node);
+    });
+    el['note-track'].appendChild(pearl);
     pearl.style.opacity = '0';
     lastActiveNote = -2;
     requestFrame();
@@ -254,8 +268,22 @@
     timing.start = now() + (ui.fallback ? 500 : 50);
     ui.voicedUntil = 0;
     lastActiveNote = -2;
-    noteNodes.forEach(function (node) { node.classList.remove('on', 'current', 'dim'); });
+    noteNodes.forEach(function (node) {
+      node.classList.remove('on', 'current', 'dim', 'tier-pop');
+      delete node.dataset.tier;
+    });
     requestFrame();
+  }
+  // Per-note tier (PRD 7.5.1.1). Purely visual: colour and a burst on the note the probe just
+  // passed. Never text, never "note N was wrong" - that would be the diagnosis P4 forbids.
+  // The last note is judged after attempt:end, so this must not depend on the recording state.
+  function onNote(event) {
+    var node = noteNodes[event.index];
+    if (!node || ['perfect', 'great', 'good', 'miss'].indexOf(event.tier) === -1) return;
+    node.dataset.tier = event.tier;
+    node.classList.remove('tier-pop');
+    void node.offsetWidth;   // restart the burst animation
+    node.classList.add('tier-pop');
   }
   function onPitch(event) {
     if (state.subPhase !== 'RECORD') return;
@@ -264,7 +292,7 @@
     updateNotes(now());
   }
   function updateNotes(time) {
-    if (!timing.mode || timing.mode === 'finale') return;
+    if (!timing.mode) return;
     var elapsed = time - timing.start;
     var active = -1;
     notes.some(function (note, index) {
@@ -299,6 +327,41 @@
       pearl.style.opacity = '0';
     }
     el['tap-target'].classList.toggle('tapped', time < tapUntil);
+  }
+
+  // FINALE plays back the player's own five phrases, seamlessly joined (PRD 7.5.1.4). The backend
+  // owns the audio; this only draws a waveform strip, one segment per phrase, lit as it plays.
+  function onPlayerReplay(event) {
+    var parts = (event.parts || []).filter(function (part) { return part.durationMs > 0; });
+    var wave = el['replay-wave'];
+    wave.textContent = '';
+    var bars = [];
+    parts.forEach(function (part) {
+      var segment = document.createElement('span');
+      segment.className = 'replay-part';
+      segment.style.flexGrow = String(part.durationMs);
+      var count = Math.max(3, Math.round(part.durationMs / 200));
+      for (var index = 0; index < count; index += 1) {
+        var bar = document.createElement('i');
+        // A deterministic, voice-like envelope: fuller mid-phrase, quieter at the edges.
+        var shape = Math.sin(Math.PI * (index + 0.5) / count);
+        var ripple = 0.5 + 0.5 * Math.abs(Math.sin(part.phraseIndex * 1.7 + index * 2.3));
+        bar.style.height = Math.round(28 + 72 * shape * ripple) + '%';
+        segment.appendChild(bar);
+        bars.push({ node: bar, at: part.startMs + part.durationMs * index / count, lit: false });
+      }
+      wave.appendChild(segment);
+    });
+    ui.replay = { start: now(), duration: Math.max(1, event.durationMs), bars: bars };
+    renderState();
+  }
+  function updateReplay(time) {
+    if (!ui.replay) return;
+    var elapsed = time - ui.replay.start;
+    ui.replay.bars.forEach(function (bar) {
+      var lit = elapsed >= bar.at;
+      if (lit !== bar.lit) { bar.lit = lit; bar.node.classList.toggle('lit', lit); }
+    });
   }
 
   function onShipIn(event) {
@@ -461,6 +524,7 @@
     if (time - lastFrame > 30) {
       lastFrame = time;
       updateNotes(time);
+      updateReplay(time);
       if (!ui.sharing) drawFleet(time);
     }
     if (!ui.sharing && (isPlaying() || state.phase === 'FINALE' || (ships.size && !reduced.matches))) requestFrame();
@@ -528,6 +592,7 @@
     if (action === 'start' || action === 'restart') startRun(false);
     else if (action === 'new-melody') startRun(true);
     else if (action === 'abort') api.abort();
+    else if (action === 'skip-tutorial') api.skipTutorial();
     else if (action === 'replay') {
       if (api.replayPhrase()) { ui.replayUsed = true; renderState(); }
     } else if (action === 'share') share();
@@ -565,6 +630,7 @@
   });
   api.on('attempt:start', attemptStart);
   api.on('attempt:pitch', onPitch);
+  api.on('attempt:note', onNote);
   api.on('attempt:end', function (event) {
     timing.mode = '';
     pearl.style.opacity = '0';
@@ -593,7 +659,8 @@
     text('ending-line', endingCopy[ui.total === 0 ? 'D' : ui.ending]);
     renderState();
   });
-  api.on('melody:replay', function (event) { installNotes(event.notes, 'finale'); });
+  // melody:replay is no longer emitted at the finale (contract C5); the player's recording replaces it.
+  api.on('player:replay', onPlayerReplay);
   api.on('notice', onTechnical);
   api.on('error', onTechnical);
 

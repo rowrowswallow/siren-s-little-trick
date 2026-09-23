@@ -29,8 +29,9 @@ from playwright.async_api import TimeoutError as PlaywrightTimeout, async_playwr
 
 VIEWPORTS = [("desktop", 1440, 900), ("landscape", 844, 390), ("portrait", 390, 844)]
 EVENTS = ["state:change", "melody:phraseStart", "attempt:countdown", "attempt:start",
-          "attempt:end", "ship:in", "ship:wrecked", "phrase:result", "game:finale",
-          "melody:replay", "notice", "error"]
+          "attempt:end", "attempt:note", "ship:in", "ship:wrecked", "phrase:result", "game:finale",
+          "player:replay", "melody:replay", "notice", "error"]
+TIERS = {"perfect", "great", "good", "miss"}
 FORBIDDEN_COPY = ["共鸣度", "评级", "金句", "你跑调了", "再大声一点", "别害羞"]
 ACTION_LABELS = {
     "start": re.compile("让她开口"),
@@ -58,10 +59,14 @@ MIC_SCRIPT = """(() => {
 
 OBSERVE_SCRIPT = """({events, synthetic}) => {
   const qa = window.__uiQA = {events: [], notes: [], voiced: 0, unvoiced: 0,
-    countdowns: [], tapDue: [], starts: [], silence: [], snapshots: []};
+    countdowns: [], tapDue: [], starts: [], silence: [], snapshots: [], tieredNotes: 0};
   events.forEach(type => Siren.on(type, payload => {
     const now = performance.now();
-    qa.events.push({type, payload, at: now});
+    // Record the phase at emit time: the tutorial's demonstration ships must not count toward the run.
+    qa.events.push({type, payload, at: now, phase: Siren.getState().phase});
+    if (type === 'attempt:note') setTimeout(() => {
+      qa.tieredNotes = Math.max(qa.tieredNotes, document.querySelectorAll('.note[data-tier]').length);
+    }, 0);
     if (type === 'melody:phraseStart') qa.notes = payload.notes;
     if (type === 'attempt:countdown') qa.countdowns.push(payload.from);
     if (type === 'attempt:end' && payload.reason === 'silence') qa.silence.push(Siren.getState().phraseIndex);
@@ -227,10 +232,15 @@ async def scenario(browser, args, mode, engine):
             if key and key not in captured and key not in ("BOOT", "PERM_REQUEST", "ANALYZE"):
                 captured.add(key)
                 await snapshot(page, report, output, mode + "-" + key.lower(), args.screenshots)
-                if synthetic and key in ("LISTEN", "RECORD", "PHRASE_RESULT"):
+                if synthetic and key in ("TUTORIAL", "LISTEN", "RECORD", "PHRASE_RESULT", "FINALE"):
                     await viewport_snapshots(page, report, output, mode + "-" + key.lower(), args.screenshots)
                 print(mode + ": " + key, flush=True)
-            if synthetic and state["subPhase"] == "LISTEN" and not replay_tested:
+                shown = [c.get("action") for c in report["layouts"][-1]["controls"]]
+                if key == "TUTORIAL" and "skip-tutorial" not in shown:
+                    report["failures"].append("TUTORIAL shows no skip control")
+                if key == "FINALE" and ("abort" in shown or "skip-tutorial" in shown):
+                    report["failures"].append("FINALE offers a way to skip the player's recording")
+            if synthetic and state["phase"] == "LEARN_LOOP" and state["subPhase"] == "LISTEN" and not replay_tested:
                 replay_tested = await click_action(page, "replay", required=False)
                 if replay_tested:
                     report["replayClicked"] = True
@@ -258,8 +268,28 @@ async def scenario(browser, args, mode, engine):
 
         report["finalState"] = await page.evaluate("Siren.getState()")
         report["trace"] = await page.evaluate("""({events: __uiQA.events, voiced: __uiQA.voiced,
-            unvoiced: __uiQA.unvoiced, starts: __uiQA.starts, silence: __uiQA.silence})""")
+            unvoiced: __uiQA.unvoiced, starts: __uiQA.starts, silence: __uiQA.silence,
+            tieredNotes: __uiQA.tieredNotes})""")
         events = report["trace"]["events"]
+        tutorial_events = [event for event in events if event.get("phase") == "TUTORIAL"]
+        events = [event for event in events if event.get("phase") != "TUTORIAL"]
+        notes = [event["payload"] for event in events if event["type"] == "attempt:note"]
+        replays = [event["payload"] for event in events if event["type"] == "player:replay"]
+        if synthetic:
+            if "TUTORIAL" not in captured:
+                report["failures"].append("First run did not show the tutorial")
+            if not any(event["type"] == "ship:wrecked" for event in tutorial_events):
+                report["failures"].append("Tutorial showed no ship reacting to the voice")
+            if not notes or any(note["tier"] not in TIERS for note in notes):
+                report["failures"].append("attempt:note missing or carries an unknown tier")
+            if not report["trace"]["tieredNotes"]:
+                report["failures"].append("attempt:note never reached the note track")
+            if len(replays) != 1 or replays[0]["durationMs"] <= 0 or not replays[0]["parts"]:
+                report["failures"].append("Expected exactly one non-empty player:replay at the finale")
+        elif replays:
+            report["failures"].append("Rhythm fallback has no recording but emitted player:replay")
+        if any(event["type"] == "melody:replay" for event in events):
+            report["failures"].append("melody:replay is retired at the finale (contract C5) but was emitted")
         phrases = [event["payload"] for event in events if event["type"] == "phrase:result"]
         report["phraseResults"] = phrases
         if [item["phraseIndex"] for item in phrases] != list(range(5)):
@@ -275,7 +305,8 @@ async def scenario(browser, args, mode, engine):
             report["failures"].append("Final boat count differs from actual wrecked ship events")
         if not report["finalState"]["shipsWrecked"]:
             report["failures"].append("Supplied musical input failed to attract any ships")
-        required = {"LISTEN", "COUNTDOWN", "RECORD", "PULL", "PHRASE_RESULT", "FINALE"}
+        # The rhythm route has no recording to play back, so FINALE passes straight to RESULT there.
+        required = {"LISTEN", "COUNTDOWN", "RECORD", "PULL", "PHRASE_RESULT"} | ({"TUTORIAL", "FINALE"} if synthetic else set())
         if not required.issubset(captured):
             report["failures"].append("Missing displayed states: " + str(sorted(required - captured)))
         if synthetic and report["trace"]["voiced"] < 5:
