@@ -83,7 +83,8 @@
   var mic = {
     stream: null, source: null, analyser: null, buf: null,
     noiseFloor: 0.004, peakRms: 0,
-    inputGain: 1,        // 校准阶段自动算出的输入增益
+    inputGain: 1,        // 校准阶段自动算出的输入增益（下一句生效）
+    appliedGain: 1,      // **本句实际施加**的增益，句首锁定，句内不变
     inputPeak: 0,        // 校准期测到的原始峰值
     gainBuf: null        // 施加增益后的副本（检测用）
   };
@@ -289,6 +290,7 @@
     Audio.release();
     recordEndReason = 'done';
     mic.inputGain = 1;
+    mic.appliedGain = 1;
     mic.inputPeak = 0;
     mic.noiseFloor = 0.004;
   }
@@ -299,12 +301,33 @@
     return Math.sqrt(sum / buf.length);
   }
 
+  /** 停掉发声后留给扬声器/房间的安定时间，再开始测底噪 */
+  var NOISE_SETTLE_MS = 120;
+
   /**
    * 采集 500ms 环境噪音基线（D3：COUNTDOWN 期间做）。
+   *
+   * ⚠️ 必须先把上一句的声音彻底停掉再测——这是手机 / 平板上"一直提示声音太小"的源头。
+   *    playPhrase 走混响，IR 尾音有 1.6s（audio.js 的 IR.seconds），而进入 COUNTDOWN
+   *    只比最后一个音晚 260ms（见 playListen 的 listenMs）。桌面戴耳机测不出来，
+   *    但平板 / 手机的扬声器离内置麦只有几厘米，且 D4.7 要求 echoCancellation:false，
+   *    于是海妖自己的混响尾音被整段测成了"环境底噪"。底噪一旦虚高，两处同时崩：
+   *      · computeInputGain 的 NOISE_CEILING 上限（0.02 / 底噪）把增益锁回 1x，
+   *        噪声越大越需要补偿，代码反而越不补；
+   *      · Segment 的静默阈值（底噪 × 1.8）把真实演唱帧判成静默，
+   *        玩家唱满全场却切不出一个音、拿 0 分。
+   *
    * ⚠️ 用"固定采样次数"而非挂钟判定结束：容器里 setTimeout 有节流，
    *    挂钟判定会让这段校准被拖长甚至不结束（自己写测试时就先踩到了）。
    */
   function calibrateNoise(done) {
+    if (!mic.analyser) { done(); return; }
+    Audio.stopPlayback();
+    // 断开 convolver 本身会有一个瞬态，等它过去再采样，别把它也测进底噪。
+    later(function () { sampleNoiseFloor(done); }, NOISE_SETTLE_MS);
+  }
+
+  function sampleNoiseFloor(done) {
     if (!mic.analyser) { done(); return; }
     var samples = [];
     var remaining = 12;          // 12 × 40ms ≈ 500ms
@@ -318,7 +341,12 @@
         return;
       }
       samples.sort(function (a, b) { return a - b; });
-      mic.noiseFloor = samples[Math.floor(samples.length * 0.75)];
+      // ⚠️ 取中位数，不是 75 分位。这里要的是"环境的常态电平"，
+      //    75 分位会被偶发的一两帧人声 / 关门声 / 残留尾音整体抬高，
+      //    而下游两处（增益上限、静默阈值）对底噪估高的惩罚都是单向的：
+      //    估低只是多收几帧噪声（YIN 的 CONF_FLOOR 会把它们挡掉），
+      //    估高却会让整句作废。所以偏差要往低了偏。
+      mic.noiseFloor = samples[Math.floor(samples.length / 2)];
       done();
     };
     step();
@@ -437,6 +465,9 @@
     lastVoicedAt = monoNow();
     lastPitchSent = 0;
     mic.peakRms = 0;
+    // 句首锁定本句的增益：句内 adaptInputGain 不会跑，但把它显式定下来，
+    // 结算时才能算出"本句实际送进检测器的电平"（见 finishRecord）。
+    mic.appliedGain = mic.inputGain > 1.05 ? mic.inputGain : 1;
 
     // 音块提示：把目标音在演唱时同步提示一遍（极短极干，绝不抢注意力）
     var notes = phraseNotes();
@@ -516,12 +547,12 @@
     if (rms > mic.peakRms) mic.peakRms = rms;
 
     var detectBuf = mic.buf;
-    if (mic.inputGain > 1.05) {
+    if (mic.appliedGain > 1.05) {
       if (!mic.gainBuf || mic.gainBuf.length !== mic.buf.length) {
         mic.gainBuf = new Float32Array(mic.buf.length);
       }
       mic.gainBuf.set(mic.buf);
-      Audio.applyInputGain(mic.gainBuf, mic.inputGain);
+      Audio.applyInputGain(mic.gainBuf, mic.appliedGain);
       detectBuf = mic.gainBuf;
     }
 
@@ -614,7 +645,18 @@
 
     // 用本句实测峰值更新增益（供下一句），并给出"收不进声音"的技术提示
     adaptInputGain();
-    if (mic.peakRms > 0 && mic.peakRms < 0.01) {
+
+    // ⚠️ 判据必须是**增益后**的有效电平，不是原始峰值。
+    //    原先这里比的是 mic.peakRms（原始），而 applyInputGain 只作用于检测副本，
+    //    于是补偿再成功也影响不到这个门槛：手机 / 平板的原始电平本来就常年在
+    //    0.01（−40 dBFS）附近（AGC 关闭 + 麦离嘴远），结果是音高检测明明正常、
+    //    分数也正常，"有点听不清"却每句都弹——这就是真机上"总是提示声音太小"。
+    //    0.01 这个数是按笔记本麦标定的（见 docs/规格问题清单.md A11 的实测 0.032）。
+    //    改成有效电平后，含义回到它本来该表达的：补偿之后仍然送不进可用区间。
+    //    注意用 mic.appliedGain（本句实际施加的）而不是 mic.inputGain——
+    //    后者刚被 adaptInputGain 改成下一句的值，用它会高估本句拿到的电平。
+    var effectivePeak = mic.peakRms * mic.appliedGain;
+    if (effectivePeak > 0 && effectivePeak < 0.01) {
       // 契约 C4 的 LOW_CONFIDENCE 前端文案为"有点听不清，再靠近一点"，
       // 正是这里要表达的意思。**不擅自新增状态码**——契约 C4 表是封闭的，
       // 若需要专门的"输入太弱"码，应由契约维护者补充。

@@ -800,10 +800,10 @@ console.log('[6] 输入增益自适应（设备电平偏低时的保护）');
   Siren.start();
   await Promise.resolve();
   await Promise.resolve();
-  for (let i = 0; i < 4000; i += 1) {
+  for (let i = 0; i < 6000; i += 1) {
     await clock.advanceTo(clock.now() + 50);
-    // 第一句录完即可，不必跑完整局
-    if (ofType('attempt:end').length >= 2) break;
+    // 跑到第三句结算：第一句必然是 1x（还没量到峰值），补偿从第二句起生效
+    if (ofType('attempt:end').length >= 3) break;
   }
   const quietPitches = ofType('attempt:pitch');
   const voicedQuiet = quietPitches.filter((e) => e.payload.voiced).length;
@@ -813,6 +813,18 @@ console.log('[6] 输入增益自适应（设备电平偏低时的保护）');
   check('输入过轻时广播 LOW_CONFIDENCE（契约 C4 已有码，未擅自新增）',
     ofType('notice').some((e) => e.payload.code === 'LOW_CONFIDENCE'),
     [...new Set(ofType('notice').map((e) => e.payload.code))].join(', ') || '(无)');
+
+  // 回归钉：真机上"总是提示声音太小"的那条。
+  // 门槛曾经比的是**原始**峰值，而增益只作用于检测副本，于是补偿再成功
+  // 也关不掉这条提示——手机 / 平板原始电平常年在 0.01 附近，五句弹五次。
+  // 现在比的是增益后的有效电平，补偿一旦把信号抬进可用区间就必须闭嘴。
+  const endIdxs = events.reduce((acc, e, i) => (e.type === 'attempt:end' ? acc.concat(i) : acc), []);
+  const afterSecondEnd = endIdxs.length >= 2 ? events.slice(endIdxs[1]) : [];
+  const lateLowConf = afterSecondEnd.filter((e) => e.type === 'notice' && e.payload.code === 'LOW_CONFIDENCE');
+  check('增益补偿生效后不再逐句重复 LOW_CONFIDENCE',
+    endIdxs.length >= 2 && lateLowConf.length === 0,
+    `第二句结算起 LOW_CONFIDENCE ${lateLowConf.length} 次（共 ${endIdxs.length} 句）`);
+
   micStub.state.amp = savedAmp;
   Siren.abort();
   events.length = 0;

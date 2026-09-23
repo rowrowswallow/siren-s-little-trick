@@ -27,6 +27,13 @@
     BOUNDARY_CENTS: 80,        // 相邻段音高差 ≥ 此值 → 新音符
     FRAGMENT_MIN_MS: 80,       // 短于此的碎片丢弃
     SILENCE_RMS_FACTOR: 1.8,   // RMS 低于噪音基线 × 此值视为静默
+    // ⚠️ 补丁：静默阈值的**相对上限**。噪音基线是录音前 500ms 估出来的一个数，
+    //    估高了就会把整句真实演唱全判成静默——手机 / 平板上尤其容易，
+    //    扬声器串音、空调开停、有人说话都会抬高它，而玩家侧的表现是
+    //    "我唱满全场却一个音都没切出来、0 分"。这里补一条只看本句自身的判据：
+    //    阈值不得高于本句实测峰值的此比例。它与基线判据取 min，
+    //    **只会让阈值变低、绝不会变高**，所以不可能把原本能切出的音切没。
+    SILENCE_PEAK_RATIO: 0.2,
     ONSET_RATIO: 0.6,          // 达到稳定能量的 60% 即认作起音（D6 哼唱处理）
     // ⚠️ 补丁（D6 原文缺失）：合并的**时间判据**。
     //    D6 只写了"音高差 < 80 音分 → 合并"，没考虑两段之间是否隔着静音。
@@ -100,6 +107,15 @@
     var notes = [];
     var i = 0;
     var n = frames.length;
+
+    // 基线估高的兜底：再看一眼本句自己的峰值（见 CFG.SILENCE_PEAK_RATIO 的说明）。
+    if (silenceRms > 0) {
+      var framePeak = 0;
+      for (var p = 0; p < n; p += 1) {
+        if (frames[p].rms > framePeak) framePeak = frames[p].rms;
+      }
+      if (framePeak > 0) silenceRms = Math.min(silenceRms, framePeak * CFG.SILENCE_PEAK_RATIO);
+    }
 
     while (i < n) {
       // 跳过无音高 / 静默帧
