@@ -289,6 +289,30 @@ for (const f of jsFiles) {
 if (!baselineHits) ok(`${jsFiles.length} 个 js 文件均不含 ES2018+ 语法`);
 info('这条只覆盖本仓库的 js；前端若用新语法需自行转译或做能力检测');
 
+// ---------------------------------------------------------------- 9. CSS 结构完整
+
+console.log('');
+console.log('[9] CSS 花括号配平（防整段误删）');
+// CSS 解析出错不会抛异常，只会静默丢弃后面的规则。v1.1.0 合并时曾误删一整段
+// （含 @keyframes 与横屏 @media 的开头），只剩一行残片，横屏布局整体塌掉，
+// 而 JS 测试全绿。花括号配平是最便宜、也足以抓住这类事故的检查。
+let cssBraceHits = 0;
+for (const f of cssFiles) {
+  const code = fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'/g, '""');
+  let depth = 0;
+  let line = 1;
+  let broken = 0;
+  for (const ch of code) {
+    if (ch === '\n') line += 1;
+    else if (ch === '{') depth += 1;
+    else if (ch === '}' && --depth < 0) { broken = line; break; }
+  }
+  if (broken) bad(`${rel(f)} 第 ${broken} 行多出一个 }（前面的规则块可能被误删）`);
+  else if (depth) bad(`${rel(f)} 末尾缺 ${depth} 个 }（有规则块未闭合）`);
+  if (broken || depth) cssBraceHits += 1;
+}
+if (!cssBraceHits) ok(`${cssFiles.length} 个 css 文件花括号配平`);
+
 // ---------------------------------------------------------------- 汇总
 
 console.log('');
