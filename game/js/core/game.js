@@ -808,6 +808,10 @@
     shipsSpawned = 0;
     shipsWrecked = 0;
     scoreSum = 0;
+    // ⚠️ 引导关的示范船队用掉了 id 1–20 和一段 rng。不重置的话正片船 id 从 21 起
+    //    （前端按 id 推算波次会整体错一波），同种子的船队也不再可复现。
+    Fleet.resetIds();
+    rng = Fleet.mulberry32(seed);
     if (!setPhase('LEARN_LOOP', null)) return;
     runPhrase();
   }

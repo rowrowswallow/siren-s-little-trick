@@ -684,6 +684,19 @@ console.log('[4b] 新手引导关（v1.1.0 / 契约 C2 的 TUTORIAL phase）');
   check('通过后写入 tutorialDone 标记',
     tutorialDoneFlag() === '1',
     tutorialDoneFlag());
+
+  // 正片船 id 必须从 1 重新开始：引导关示范船队占用过 1–20，不重置会让正片从 21 起
+  const tutShipCount = ofType('ship:in').length;
+  // （ship:in 按 entryDelayMs 先后发出，不按 id 排序，所以看首波 20 条的 id 集合）
+  let g3 = 0;
+  while (ofType('ship:in').length < tutShipCount + 20 && Siren.getState().phase === 'LEARN_LOOP') {
+    await clock.advanceTo(clock.now() + 50);
+    if (++g3 > 4000) break;
+  }
+  const mainIds = ofType('ship:in').slice(tutShipCount, tutShipCount + 20).map((e) => e.payload.id);
+  check('引导关后正片船 id 从 1 重新开始（首波 = 1..20）',
+    mainIds.length === 20 && Math.min(...mainIds) === 1 && Math.max(...mainIds) === 20,
+    mainIds.length ? 'min=' + Math.min(...mainIds) + ' max=' + Math.max(...mainIds) : '(正片未发 ship:in)');
   Siren.abort();
 
   // ---- 跳过路径
